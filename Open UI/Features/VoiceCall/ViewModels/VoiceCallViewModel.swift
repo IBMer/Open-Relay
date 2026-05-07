@@ -207,6 +207,15 @@ final class VoiceCallViewModel {
 
         // Disable speaker override so TTS outside a call behaves normally
         ttsService.speakerOverrideEnabled = false
+        ttsService.outputPortOverride = .none
+
+        // Restore the global baseline audio session so HTML audio and regular TTS
+        // continue working after the voice call ends.
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playAndRecord, mode: .default,
+                                 options: [.defaultToSpeaker, .allowBluetoothHFP,
+                                           .allowBluetoothA2DP, .mixWithOthers])
+        try? session.setActive(true)
 
         // Reset voice mode flag so normal chat from the same ChatViewModel
         // doesn't continue sending features.voice=true after the call ends.
@@ -269,7 +278,11 @@ final class VoiceCallViewModel {
                 output.portType == .carAudio || output.portType == .bluetoothHFP
             }
             guard !isCarPlayOrHFP else { return }
-            try session.overrideOutputAudioPort(isSpeakerOn ? .speaker : .none)
+            let portOverride: AVAudioSession.PortOverride = isSpeakerOn ? .speaker : .none
+            // Persist into TTS service so it re-applies the override whenever it
+            // reconfigures the audio session (setActive resets overrideOutputAudioPort).
+            ttsService.outputPortOverride = portOverride
+            try session.overrideOutputAudioPort(portOverride)
         } catch {
             logger.warning("Speaker override failed: \(error.localizedDescription)")
         }

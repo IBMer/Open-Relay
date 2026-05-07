@@ -151,10 +151,16 @@ actor StreamingPipeline {
     // snapshot when the boundary hasn't moved. Swift String == fast-paths to true
     // instantly when both sides share the same internal buffer (COW pointer equality),
     // so AssistantMessageContent.ParseCache skips its O(N) reparse on stable ticks.
+    //
+    // `splitIdx` stores the String.Index used to produce the cached slice.
+    // On a cache hit the boundary hasn't moved, so `displayContent` has only grown
+    // by appending — the stored index is still valid. Reusing it eliminates the
+    // repeated `displayContent.index(startIndex, offsetBy: N)` call, which is O(N)
+    // and was previously paid on every tick even when the boundary didn't advance.
 
-    private var _cachedFrozenContent: (offset: Int, value: String) = (0, "")
-    private var _cachedLiveTailFrozenProse: (offset: Int, value: String) = (0, "")
-    private var _cachedPureFrozenProse: (offset: Int, value: String) = (0, "")
+    private var _cachedFrozenContent: (offset: Int, value: String, splitIdx: String.Index?) = (0, "", nil)
+    private var _cachedLiveTailFrozenProse: (offset: Int, value: String, splitIdx: String.Index?) = (0, "", nil)
+    private var _cachedPureFrozenProse: (offset: Int, value: String, splitIdx: String.Index?) = (0, "", nil)
 
     // MARK: - Flags cache (keyed by buffer.utf8.count — fast O(1) after first calc)
 
@@ -216,9 +222,9 @@ actor StreamingPipeline {
         frozenProseBoundaryOffset = 0
         _toolCallFlagsCache = nil
         _reasoningFlagsCache = nil
-        _cachedFrozenContent = (0, "")
-        _cachedLiveTailFrozenProse = (0, "")
-        _cachedPureFrozenProse = (0, "")
+        _cachedFrozenContent = (0, "", nil)
+        _cachedLiveTailFrozenProse = (0, "", nil)
+        _cachedPureFrozenProse = (0, "", nil)
     }
 
     // MARK: - Timer management
@@ -385,15 +391,18 @@ actor StreamingPipeline {
         if fb > 0 && dcCount >= fb {
             // Tool/reasoning split — frozenContent is stable once fb stops advancing.
             // Reuse cached String instance (preserves COW pointer → downstream == is O(1)).
-            if _cachedFrozenContent.offset == fb {
+            let fbIdx: String.Index
+            if _cachedFrozenContent.offset == fb, let cachedIdx = _cachedFrozenContent.splitIdx {
+                // Cache hit: reuse the stored index — O(1), no traversal from startIndex.
                 frozenContent = _cachedFrozenContent.value
+                fbIdx = cachedIdx
             } else {
-                let fbIdx = displayContent.index(displayContent.startIndex, offsetBy: fb)
+                // Cache miss: compute index once and cache it alongside the string.
+                fbIdx = displayContent.index(displayContent.startIndex, offsetBy: fb)
                 frozenContent = String(displayContent[..<fbIdx])
-                _cachedFrozenContent = (fb, frozenContent)
+                _cachedFrozenContent = (fb, frozenContent, fbIdx)
             }
-            // liveTail grows every tick — always a fresh slice (small, cheap).
-            let fbIdx = displayContent.index(displayContent.startIndex, offsetBy: fb)
+            // liveTail grows every tick — always a fresh slice using the cached fbIdx.
             liveTail = String(displayContent[fbIdx...])
 
             // Further split liveTail at prose boundary.
@@ -401,32 +410,34 @@ actor StreamingPipeline {
             if prose > fb {
                 let relP = prose - fb
                 if liveTail.count >= relP {
-                    if _cachedLiveTailFrozenProse.offset == prose {
+                    if _cachedLiveTailFrozenProse.offset == prose, let cachedSplit = _cachedLiveTailFrozenProse.splitIdx {
+                        // Cache hit: reuse stored index — O(1).
                         liveTailFrozenProse = _cachedLiveTailFrozenProse.value
+                        liveTailLiveProse = String(liveTail[cachedSplit...])
                     } else {
+                        // Cache miss: compute index and cache.
                         let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relP)
                         liveTailFrozenProse = String(liveTail[..<splitIdx])
-                        _cachedLiveTailFrozenProse = (prose, liveTailFrozenProse)
+                        _cachedLiveTailFrozenProse = (prose, liveTailFrozenProse, splitIdx)
+                        liveTailLiveProse = String(liveTail[splitIdx...])
                     }
-                    // liveTailLiveProse is always the tiny growing tip — fresh each tick.
-                    let splitIdx = liveTail.index(liveTail.startIndex, offsetBy: relP)
-                    liveTailLiveProse = String(liveTail[splitIdx...])
                     relProse = relP
                 }
             }
         } else if fb == 0 && prose > 0 && dcCount >= prose {
             // Pure-prose split (no tool/reasoning blocks).
             // pureFrozenProse is stable once prose stops advancing — cache it.
-            if _cachedPureFrozenProse.offset == prose {
+            if _cachedPureFrozenProse.offset == prose, let cachedSplit = _cachedPureFrozenProse.splitIdx {
+                // Cache hit: reuse stored index — O(1), no traversal from startIndex.
                 pureFrozenProse = _cachedPureFrozenProse.value
+                pureLiveProse = String(displayContent[cachedSplit...])
             } else {
+                // Cache miss: compute index and cache.
                 let splitIdx = displayContent.index(displayContent.startIndex, offsetBy: prose)
                 pureFrozenProse = String(displayContent[..<splitIdx])
-                _cachedPureFrozenProse = (prose, pureFrozenProse)
+                _cachedPureFrozenProse = (prose, pureFrozenProse, splitIdx)
+                pureLiveProse = String(displayContent[splitIdx...])
             }
-            // pureLiveProse is the growing tip — fresh each tick.
-            let splitIdx = displayContent.index(displayContent.startIndex, offsetBy: prose)
-            pureLiveProse = String(displayContent[splitIdx...])
         }
 
         let snap = StreamingSnapshot(

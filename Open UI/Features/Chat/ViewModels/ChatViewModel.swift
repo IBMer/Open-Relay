@@ -5462,11 +5462,30 @@ final class ChatViewModel {
             guard let index = conversation?.messages.firstIndex(where: { $0.id == id }) else { return }
 
             if !isStreaming && streamingStore.streamingMessageId == id {
-                // Streaming just ended — flush store to conversation
-                let result = streamingStore.endStreaming()
+                // Streaming just ended — flush store to conversation.
+                //
+                // DRAIN-DEFERRAL: We defer message.isStreaming=false and cleanupStreaming()
+                // until the pipeline has fully drained all buffered tokens. This prevents
+                // the stop button from disappearing and the action bar/input from appearing
+                // while the typewriter effect is still running.
+                //
+                // Content is written immediately (it doesn't affect UI chrome) so the
+                // message history tree node is always up-to-date regardless of timing.
+                let result = streamingStore.endStreaming(onDrained: { [weak self] in
+                    guard let self else { return }
+                    guard let idx = self.conversation?.messages.firstIndex(where: { $0.id == id }) else {
+                        // Message may have been removed (e.g., user cleared chat); just cleanup.
+                        self.cleanupStreaming()
+                        return
+                    }
+                    // Mark message as no longer streaming — this hides the stop button
+                    // and shows the action bar, but only once all tokens are displayed.
+                    self.conversation?.messages[idx].isStreaming = false
+                    self.cleanupStreaming()
+                })
                 let finalContent = content.isEmpty ? result.content : content
                 conversation?.messages[index].content = finalContent
-                conversation?.messages[index].isStreaming = false
+                // NOTE: message.isStreaming = false is intentionally deferred above.
                 // Merge sources from store into message
                 if !result.sources.isEmpty {
                     for source in result.sources {

@@ -43,15 +43,49 @@ struct StreamingMarkdownView: View {
     // Cache it as @State and only rebuild when accessibilityScale or textColor changes.
     @State private var cachedTheme: MarkdownTheme = MarkdownTheme.default
 
-    // B4 fix: Cache resolveSegments / parseSpecialBlocks output.
-    // For finalized (non-streaming) messages the content never changes after
-    // first render, so parse runs exactly once per message lifetime.
-    // During streaming we always re-parse because content grows every frame.
-    // The common 60-fps streaming case is handled by the streaming split-render
-    // path in IsolatedAssistantMessage, which only passes the *live tail* here.
-    @State private var cachedSegments: [ContentSegment] = []
-    @State private var cachedSegmentsContent: String = ""
-    @State private var cachedSegmentsIsStreaming: Bool = false
+    // B4 fix: Cache resolveSegments / parseSpecialBlocks output via a
+    // reference-type cache. Mutating a class property during body evaluation
+    // is safe — SwiftUI only tracks @State/@Observable value changes, not
+    // internal class mutations. This eliminates the O(N) parseCodeBlocks()
+    // call that was firing on every drain tick (60fps) once a code block's
+    // closing fence had arrived in the displayed content.
+    @State private var segmentCache = SegmentCache()
+
+    /// Reference-type segment parse cache. Keyed by (content, isStreaming).
+    /// A cache miss triggers parseSpecialBlocks(); a hit returns the stored
+    /// result in O(1) via Swift COW pointer equality on the content string.
+    ///
+    /// Also caches the opening fence location for `resolveStreamingCodeBlock()`.
+    /// Once the fence is found (Phase 1 or Phase 2 of that function), subsequent
+    /// ticks only scan the *new* suffix for a closing fence — O(delta) instead of
+    /// the previous O(N) × 4 full re-scan on every drain tick.
+    private final class SegmentCache {
+        // parseSpecialBlocks cache
+        var content: String = ""
+        var isStreaming: Bool = false
+        var segments: [ContentSegment] = []
+
+        // Fence location cache for resolveStreamingCodeBlock fast path.
+        //
+        // `fenceContentStart` is the String.Index of the first character of the
+        // code block body (i.e. the char just after the opening fence's \n).
+        // It is stable for the entire life of an open code block because content
+        // only grows by appending — the fence never moves.
+        //
+        // `fenceBaseByteCount` is the utf8.count of `content` when the fence was
+        // found. On each new tick we verify content.utf8.count > fenceBaseByteCount
+        // (always true for an append) and that content[..<fenceContentStart] still
+        // matches (implicit — Swift indices are stable under appends).
+        var fenceContentStart: String.Index? = nil
+        var fenceBaseByteCount: Int = 0
+        var fenceLanguage: String = ""
+        // true → Phase 1 (html/svg live-preview); false → Phase 2 (generic .streamingCode)
+        var fenceIsLivePreview: Bool = false
+        // Phase 1 only: the makeSeg closure cached so we don't re-allocate the array literal
+        var fenceMakeSegTag: String = ""   // "html" or "svg"
+        // Phase 1 only: text before the opening fence (stable once fence is found)
+        var fenceBeforeText: String = ""
+    }
 
 
     init(content: String, isStreaming: Bool, textColor: SwiftUI.Color? = nil) {
@@ -180,40 +214,121 @@ struct StreamingMarkdownView: View {
             // (opening AND closing fence both arrived) while post-block prose is still
             // streaming. Use parseSpecialBlocks so HTML/SVG/chart blocks already closed
             // render as previews instead of flashing to raw code text until streaming ends.
-            return parseSpecialBlocks(content)
+            //
+            // CACHE: parseSpecialBlocks / parseCodeBlocks is O(N) and was previously
+            // called on every drain tick (~60fps) once a code block's closing fence
+            // arrived. The content string only grows by ~7 chars per tick (maxRatePerFrame),
+            // so consecutive ticks with identical content are pure wasted work.
+            // Cache the result and return it directly on a hit (O(1) COW pointer check).
+            return cachedParseSpecialBlocks(content, isStreaming: true)
 
         } else {
-            return parseSpecialBlocks(content)
+            // Non-streaming: content never changes after first render — cache ensures
+            // parseSpecialBlocks runs exactly once per message lifetime.
+            return cachedParseSpecialBlocks(content, isStreaming: false)
         }
     }
 
-    /// Detects an incomplete (unclosed) ` ```html ` or ` ```svg ` code block
-    /// in `text` during streaming and returns a segment list with a live preview.
+    /// Returns cached parseSpecialBlocks result when content+isStreaming unchanged,
+    /// otherwise re-parses and stores the result. O(1) on cache hit.
+    private func cachedParseSpecialBlocks(_ content: String, isStreaming: Bool) -> [ContentSegment] {
+        if segmentCache.content == content && segmentCache.isStreaming == isStreaming {
+            return segmentCache.segments
+        }
+        let result = parseSpecialBlocks(content)
+        segmentCache.content = content
+        segmentCache.isStreaming = isStreaming
+        segmentCache.segments = result
+        return result
+    }
+
+    /// Detects an incomplete (unclosed) fenced code block in `text` during streaming.
     ///
-    /// Returns `nil` when no incomplete special block is found, letting the caller
-    /// fall back to plain markdown rendering.
+    /// **Priority order:**
+    /// 1. `html` / `svg` → live preview via `HTMLPreviewView` / `SVGPreviewView`
+    /// 2. Any other language → `StreamingCodeBlockView` (O(delta) append + O(viewport) windowed render)
+    ///
+    /// Returns `nil` when no incomplete fenced code block is found, letting the
+    /// caller fall back to plain markdown rendering via `MarkdownView`.
+    ///
+    /// ## Performance
+    /// After the opening fence is located on the first call, the fence position is
+    /// cached in `segmentCache`. Subsequent ticks (where `text` is always an append
+    /// of the previous `text`) skip all four O(N) `range(of:)` scans and only scan
+    /// the *new* suffix for a closing fence — reducing per-tick cost to O(delta).
     private func resolveStreamingCodeBlock(_ text: String) -> [ContentSegment]? {
-        // We only care about html and svg — mermaid needs complete syntax to render.
-        let candidates: [(tag: String, makeSeg: (String) -> ContentSegment)] = [
-            ("```html\n",  { .html($0, isStreaming: true) }),
-            ("```svg\n",   { .svg($0, isStreaming: true) }),
+        let textByteCount = text.utf8.count
+
+        // ── FAST PATH: fence already located and text is a streaming append ──
+        // `fenceContentStart` is valid when we previously found an open fence and
+        // the content has only grown (utf8 count is strictly larger than when found).
+        if let cachedStart = segmentCache.fenceContentStart,
+           textByteCount > segmentCache.fenceBaseByteCount {
+            // Only scan the suffix *after* the known fence start for a closing fence.
+            // This is O(delta) — proportional only to newly-appended characters.
+            let afterOpen = text[cachedStart...]
+            if afterOpen.range(of: "\n```") != nil {
+                // Closing fence just arrived — invalidate and fall through to slow path
+                // so parseSpecialBlocks (caller's fallback) handles the complete block.
+                segmentCache.fenceContentStart = nil
+                return nil
+            }
+            // Still open — build result from cached metadata + growing suffix.
+            let partialContent = String(afterOpen)
+            if segmentCache.fenceIsLivePreview {
+                let tag = segmentCache.fenceMakeSegTag
+                let makeSeg: (String) -> ContentSegment = tag == "html"
+                    ? { .html($0, isStreaming: true) }
+                    : { .svg($0, isStreaming: true) }
+                let before = segmentCache.fenceBeforeText
+                var result: [ContentSegment] = []
+                if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    result.append(.markdown(before))
+                }
+                if !partialContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    result.append(makeSeg(partialContent))
+                }
+                return result.isEmpty ? nil : result
+            } else {
+                // Phase 2 generic code block
+                let before = segmentCache.fenceBeforeText
+                var result: [ContentSegment] = []
+                if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    result.append(.markdown(before))
+                }
+                result.append(.streamingCode(partialContent, language: segmentCache.fenceLanguage))
+                return result
+            }
+        }
+
+        // ── SLOW PATH: first call or content replaced — locate fence via full scan ──
+        // Runs at most once per code block (until closing fence arrives).
+
+        // ── Phase 1: Live-preview languages (html/svg) ─────────────────────
+        let livePreviewCandidates: [(tag: String, langKey: String)] = [
+            ("```html\n", "html"),
+            ("```svg\n",  "svg"),
         ]
-
-        for (tag, makeSeg) in candidates {
+        for (tag, langKey) in livePreviewCandidates {
             guard let openRange = text.range(of: tag, options: .caseInsensitive) else { continue }
-
             let contentStart = openRange.upperBound
             let afterOpen = text[contentStart...]
+            if afterOpen.range(of: "\n```") != nil { continue }  // complete — skip
 
-            // If the closing fence is already present, this is a complete block —
-            // parseSpecialBlocks (non-streaming path) handles it. Skip here.
-            if afterOpen.range(of: "\n```") != nil { continue }
-
-            // Incomplete block — extract partial content
             let partialContent = String(afterOpen)
-            // Anything before the opening fence is plain markdown
             let before = String(text[text.startIndex..<openRange.lowerBound])
 
+            // Cache fence location for fast path on next tick.
+            segmentCache.fenceContentStart = contentStart
+            segmentCache.fenceBaseByteCount = textByteCount
+            segmentCache.fenceIsLivePreview = true
+            segmentCache.fenceMakeSegTag = langKey
+            segmentCache.fenceLanguage = langKey
+            segmentCache.fenceBeforeText = before
+
+            let makeSeg: (String) -> ContentSegment = langKey == "html"
+                ? { .html($0, isStreaming: true) }
+                : { .svg($0, isStreaming: true) }
             var result: [ContentSegment] = []
             if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.append(.markdown(before))
@@ -223,7 +338,55 @@ struct StreamingMarkdownView: View {
             }
             return result.isEmpty ? nil : result
         }
-        return nil
+
+        // ── Phase 2: Generic unclosed fence → StreamingCodeBlockView ───────
+        guard let fenceStart = text.range(of: "```") else { return nil }
+        let afterTicks = text[fenceStart.upperBound...]
+
+        let language: String
+        let partialContent: String
+
+        if let newlineAfterFence = afterTicks.firstIndex(of: "\n") {
+            language = String(afterTicks[afterTicks.startIndex..<newlineAfterFence])
+                .trimmingCharacters(in: .whitespaces)
+                .lowercased()
+            let contentStart = text.index(after: newlineAfterFence)
+            let afterOpen = text[contentStart...]
+            if afterOpen.range(of: "\n```") != nil { return nil }  // complete block
+            partialContent = String(afterOpen)
+
+            let before = String(text[text.startIndex..<fenceStart.lowerBound])
+
+            // Cache fence location only once the fence line is complete (has \n).
+            // Do NOT cache when the fence line is still arriving — the endIndex of
+            // the partial text would become a mid-string index in the next tick's
+            // longer string, corrupting the language label and first content line.
+            segmentCache.fenceContentStart = contentStart
+            segmentCache.fenceBaseByteCount = textByteCount
+            segmentCache.fenceIsLivePreview = false
+            segmentCache.fenceLanguage = language
+            segmentCache.fenceBeforeText = before
+
+            var result: [ContentSegment] = []
+            if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result.append(.markdown(before))
+            }
+            result.append(.streamingCode(partialContent, language: language))
+            return result
+        } else {
+            // Fence line still arriving (e.g. "```python" with no \n yet).
+            // Do NOT cache — the index would be invalid in the next tick's longer string.
+            language = String(afterTicks).trimmingCharacters(in: .whitespaces).lowercased()
+            partialContent = ""
+            let before = String(text[text.startIndex..<fenceStart.lowerBound])
+            var result: [ContentSegment] = []
+            if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result.append(.markdown(before))
+            }
+            // Still emit .streamingCode with empty content to stabilise view identity.
+            result.append(.streamingCode(partialContent, language: language))
+            return result
+        }
     }
 
     /// Extracts the text that appears before `@@@VIZ-START` in the content.
@@ -287,6 +450,22 @@ struct StreamingMarkdownView: View {
             SVGPreviewView(code: code, isStreaming: streaming)
         case .python(let code):
             PythonCodeBlockView(code: code)
+        case .streamingCode(let code, let language):
+            StreamingCodeBlockView(
+                language: language,
+                content: code,
+                isStreaming: true,
+                theme: cachedTheme
+            )
+        case .code(let code, let language):
+            // Finalized large code block — rendered via StreamingCodeBlockView(isStreaming:false)
+            // to avoid the O(n) CommonMark parse spike MarkdownView triggers on transition.
+            StreamingCodeBlockView(
+                language: language,
+                content: code,
+                isStreaming: false,
+                theme: cachedTheme
+            )
         case .markdownImage(let imageURL, let altText, let linkURL):
             MarkdownInlineImageView(imageURL: imageURL, altText: altText, linkURL: linkURL)
         case .visualization(let html):
@@ -320,6 +499,16 @@ struct StreamingMarkdownView: View {
         /// `isStreaming` — true while the closing ``` fence has not yet arrived.
         case svg(String, isStreaming: Bool)
         case python(String)
+        /// A code block being actively streamed (unclosed fence). Rendered via
+        /// `StreamingCodeBlockView` which uses O(delta) incremental appends and
+        /// O(viewport) virtual line windowing — bypasses IncrementalStreamingParser
+        /// entirely to avoid O(n²) re-parse lag on large blocks.
+        case streamingCode(String, language: String)
+        /// A finalized (closed fence) large plain code block (>50 lines). Rendered
+        /// via `StreamingCodeBlockView(isStreaming: false)` to bypass the O(n)
+        /// CommonMark full-parse spike ("Frame of Doom") that MarkdownView triggers
+        /// the moment a big code block transitions from streaming → done.
+        case code(String, language: String)
         case markdownImage(imageURL: URL, altText: String, linkURL: URL?)
         case visualization(String)
     }
@@ -605,13 +794,20 @@ struct StreamingMarkdownView: View {
             } else if isHTML {
                 segments.append(.html(codeContent, isStreaming: false))
             } else {
-                // Plain code block — reconstruct the fenced markdown so MarkdownView
-                // renders it with syntax highlighting. Any literal ``` inside the code
-                // content (e.g. from nested blocks) are preserved as-is, which is
-                // exactly how WebUI renders such blocks.
-                let fence = String(repeating: "`", count: openerTickCount)
-                let fencedBlock = "\(fence)\(lang)\n\(codeContent)\n\(fence)"
-                segments.append(.markdown(fencedBlock))
+                // Plain code block. For large blocks (>50 lines) use StreamingCodeBlockView
+                // with isStreaming:false to avoid the O(n) CommonMark full-parse spike
+                // ("Frame of Doom") that MarkdownView triggers on the streaming→done transition.
+                let lineCount = codeContent.components(separatedBy: "\n").count
+                if lineCount > 50 {
+                    segments.append(.code(codeContent, language: lang))
+                } else {
+                    // Small block — reconstruct fenced markdown so MarkdownView renders it
+                    // with syntax highlighting. Any literal ``` inside the code content
+                    // (e.g. from nested blocks) are preserved as-is.
+                    let fence = String(repeating: "`", count: openerTickCount)
+                    let fencedBlock = "\(fence)\(lang)\n\(codeContent)\n\(fence)"
+                    segments.append(.markdown(fencedBlock))
+                }
             }
 
             i = closerIdx + 1

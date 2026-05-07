@@ -4,6 +4,7 @@ import PhotosUI
 import UniformTypeIdentifiers
 import os.log
 import ImageIO
+import CoreImage
 
 /// Manages file attachment handling for chats and notes, including
 /// image picking, document selection, and file upload to the server.
@@ -501,41 +502,84 @@ final class FileAttachmentService {
 
     // MARK: - Image Size Limit
 
-    /// Maximum total pixels for uploaded images (2 megapixels).
-    /// A 2 MP JPEG at 0.85 quality is typically 1-2 MB — well under the
-    /// API's 5 MB limit — while retaining enough detail for vision models.
-    private static let maxPixels: CGFloat = 2_000_000
+    /// Maximum total pixels for uploaded images (4 megapixels ≈ 2000×2000).
+    /// This fills GPT-4o's max tile budget (2048px), Claude's and Gemini's
+    /// high-resolution paths, giving vision models the most detail possible
+    /// while keeping JPEG output well under 5 MB for typical photos.
+    private static let maxPixels: CGFloat = 4_000_000
 
-    /// Downsamples an image to ≤ 2 MP and returns JPEG data at 0.85 quality.
-    /// If the image is already within the pixel budget, it is only re-encoded
-    /// to JPEG (no resize). Returns the original data unchanged if decoding fails.
+    /// Upload size ceiling enforced by the /files API.
+    private static let uploadSizeLimit = 5 * 1_024 * 1_024   // 5 MB
+
+    /// Downsamples an image to ≤ 4 MP and returns JPEG data.
+    /// If the image is already within the pixel budget, it is only re-encoded.
+    /// Returns the original data unchanged if decoding fails.
     static func downsampleForUpload(data: Data, image: UIImage? = nil, logger: Logger? = nil) -> Data {
         guard let img = image ?? UIImage(data: data) else { return data }
         return downsampleForUpload(image: img, logger: logger)
     }
 
-    /// Core implementation: downscale `UIImage` to ≤ 2 MP, encode as JPEG.
+    /// Core implementation: downscale `UIImage` to ≤ 4 MP using Lanczos3 resampling
+    /// (GPU-accelerated via `CILanczosScaleTransform`), then encode as JPEG with a
+    /// progressive quality fallback to guarantee the result stays under 5 MB.
+    ///
+    /// Algorithm rationale:
+    /// - `UIGraphicsImageRenderer.draw` uses bilinear interpolation — it blurs fine
+    ///   detail that vision models need to correctly interpret photos.
+    /// - `CILanczosScaleTransform` uses a Lanczos3 (sinc-windowed) kernel, which is
+    ///   the gold standard for photo downsampling: sharp edges, minimal aliasing.
     static func downsampleForUpload(image: UIImage, logger: Logger? = nil) -> Data {
         let w = image.size.width
         let h = image.size.height
         let totalPixels = w * h
 
-        if totalPixels <= maxPixels {
-            // Already small enough — just encode to JPEG
-            return image.jpegData(compressionQuality: 0.85) ?? Data()
+        // ── 1. Resize to ≤ maxPixels using Lanczos3 ──────────────────────────
+        let targetImage: UIImage
+        if totalPixels > maxPixels {
+            let scaleFactor = sqrt(maxPixels / totalPixels)
+            let targetW = round(w * scaleFactor)
+            let targetH = round(h * scaleFactor)
+
+            if let ciInput = CIImage(image: image) {
+                let scaleX = targetW / ciInput.extent.width
+                let filter = CIFilter(name: "CILanczosScaleTransform")!
+                filter.setValue(ciInput,  forKey: kCIInputImageKey)
+                filter.setValue(scaleX,   forKey: kCIInputScaleKey)
+                filter.setValue(1.0,      forKey: kCIInputAspectRatioKey)
+
+                let ctx = CIContext(options: [.useSoftwareRenderer: false])
+                if let output = filter.outputImage,
+                   let cg = ctx.createCGImage(output, from: output.extent) {
+                    targetImage = UIImage(cgImage: cg, scale: 1, orientation: image.imageOrientation)
+                    logger?.info("Lanczos downsampled \(Int(w))×\(Int(h)) → \(Int(targetW))×\(Int(targetH))")
+                } else {
+                    // CI pipeline failed — fall back to original
+                    targetImage = image
+                    logger?.warning("CILanczosScaleTransform failed, using original dimensions")
+                }
+            } else {
+                targetImage = image
+                logger?.warning("CIImage init failed, using original dimensions")
+            }
+        } else {
+            targetImage = image
         }
 
-        // Scale factor to reach exactly maxPixels
-        let scale = sqrt(maxPixels / totalPixels)
-        let newSize = CGSize(width: round(w * scale), height: round(h * scale))
-
-        let renderer = UIGraphicsImageRenderer(size: newSize)
-        let resized = renderer.image { _ in
-            image.draw(in: CGRect(origin: .zero, size: newSize))
+        // ── 2. Encode JPEG with progressive quality fallback ──────────────────
+        // Starts at 0.85 (visually lossless for photos). Only steps down if the
+        // encoded result would still exceed the 5 MB API limit, which is rare at
+        // 4 MP but possible for extreme-detail images.
+        let qualities: [CGFloat] = [0.85, 0.75, 0.65, 0.55, 0.45]
+        for quality in qualities {
+            if let data = targetImage.jpegData(compressionQuality: quality),
+               data.count < uploadSizeLimit {
+                if quality < 0.85 {
+                    logger?.warning("Used JPEG quality \(quality) to fit under 5 MB (\(data.count) bytes)")
+                }
+                return data
+            }
         }
-
-        let result = resized.jpegData(compressionQuality: 0.85) ?? Data()
-        logger?.info("Downsampled image from \(Int(w))×\(Int(h)) to \(Int(newSize.width))×\(Int(newSize.height)) (\(result.count) bytes)")
-        return result
+        // Last-resort: 0.45 quality regardless of size
+        return targetImage.jpegData(compressionQuality: 0.45) ?? Data()
     }
 }

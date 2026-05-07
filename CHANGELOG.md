@@ -1,5 +1,19 @@
 # Changelog
 
+## v4.1 — May 6, 2026
+
+### What's New
+- Image size reduction - 5mb cap on vision models cause error if the image is too big.
+- Native visualizations now support audio output.
+
+### Improvements
+- Minor code block performance improvements.
+
+### Bug Fixes
+- Fixed update notice incorrectly triggering based on GitHub tags instead of the actual App Store version.
+
+## Previous Builds
+
 ## v4.0 — May 5, 2026
 
 ### What's New

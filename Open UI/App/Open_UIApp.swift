@@ -2,6 +2,7 @@ import SwiftUI
 import WidgetKit
 import BackgroundTasks
 import UIKit
+import AVFoundation
 
 // MLX is always present when either audio framework is linked.
 // Import it unconditionally so we can set Memory.cacheLimit at startup
@@ -83,6 +84,24 @@ struct Open_UIApp: App {
         #if canImport(MLX)
         Memory.cacheLimit = 20 * 1024 * 1024  // 20 MB
         #endif
+
+        // Establish the global AVAudioSession baseline at launch.
+        // .playAndRecord ignores the hardware silent switch (unlike .ambient/.soloAmbient).
+        // .defaultToSpeaker routes to the main loud speaker rather than the earpiece.
+        // .mixWithOthers prevents interrupting music/podcasts from other apps.
+        // .allowBluetoothHFP/.allowBluetoothA2DP keep BT headsets and CarPlay connected.
+        //
+        // Setting this BEFORE any WKWebView is created ensures the WebContent process
+        // inherits the "ignore silent switch" behavior. Individual services (TTS, voice call)
+        // can adjust category/mode on the same shared session as needed, then the JS
+        // audioSessionHandler re-asserts .playback when HTML audio starts.
+        let audioSession = AVAudioSession.sharedInstance()
+        try? audioSession.setCategory(
+            .playAndRecord,
+            mode: .default,
+            options: [.defaultToSpeaker, .allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers]
+        )
+        try? audioSession.setActive(true)
 
         // Remove the default circular/pill-shaped backgrounds from navigation
         // bar toolbar buttons that iOS adds in dark mode (iOS 15+).

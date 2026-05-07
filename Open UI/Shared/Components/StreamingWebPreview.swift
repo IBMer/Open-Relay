@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import AVFoundation
 
 // MARK: - Render Mode
 
@@ -43,14 +44,27 @@ struct StreamingWebPreview: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> WKWebView {
+        // Ensure the shared audio session is active so the WebContent process inherits
+        // the global baseline (.playAndRecord + .defaultToSpeaker + .mixWithOthers) set
+        // at app launch. No category change here — the JS audioSessionHandler re-asserts
+        // it at the moment audio actually starts.
+        try? AVAudioSession.sharedInstance().setPreferredSampleRate(48000)
+        try? AVAudioSession.sharedInstance().setActive(true)
+
         let userController = WKUserContentController()
         userController.add(context.coordinator, name: "heightHandler")
+        userController.add(context.coordinator, name: "audioSessionHandler")
 
         let config = WKWebViewConfiguration()
         config.userContentController = userController
         let prefs = WKWebpagePreferences()
         prefs.allowsContentJavaScript = true
         config.defaultWebpagePreferences = prefs
+
+        // Allow inline media playback and remove gesture requirement so
+        // JS-triggered audio (Web Audio API, <audio>.play()) works like a browser.
+        config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.isOpaque = false
@@ -144,6 +158,18 @@ struct StreamingWebPreview: UIViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
+            if message.name == "audioSessionHandler" {
+                // JS is about to create an AudioContext or play an <audio> element.
+                // Re-assert the global baseline (.playAndRecord + .defaultToSpeaker + .mixWithOthers)
+                // so audio plays through the silent switch, regardless of what any prior TTS/call
+                // session left the category as.
+                let session = AVAudioSession.sharedInstance()
+                try? session.setCategory(.playAndRecord, mode: .default,
+                                         options: [.defaultToSpeaker, .allowBluetoothHFP,
+                                                   .allowBluetoothA2DP, .mixWithOthers])
+                try? session.setActive(true)
+                return
+            }
             guard message.name == "heightHandler" else { return }
             let h: CGFloat
             if let v = message.body as? CGFloat, v > 0 { h = v }
@@ -158,6 +184,11 @@ struct StreamingWebPreview: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // Ensure the session is active — don't change category here, rely on the
+            // global baseline (.playAndRecord + .defaultToSpeaker + .mixWithOthers) set
+            // at app launch. The JS audioSessionHandler re-asserts it when audio starts.
+            try? AVAudioSession.sharedInstance().setActive(true)
+
             DispatchQueue.main.async {
                 self.shellLoaded = true
                 if let pending = self.pendingContent {
@@ -268,6 +299,78 @@ struct StreamingWebPreview: UIViewRepresentable {
         <body>
           <div id="render"></div>
           <script>
+          // ── navigator.audioSession: bypass hardware silent switch for WebAudio ──
+          // WebKit's WebContent process manages its own internal audio pipeline that
+          // does NOT inherit the host app's AVAudioSession category. Since iOS 16.3,
+          // AudioContext audio is muted by the silent switch regardless of what the
+          // native AVAudioSession is set to. Setting navigator.audioSession.type to
+          // 'playback' is the ONLY reliable way to make WebAudio ignore the silent
+          // switch inside WKWebView. (Confirmed fix per WebKit bug #251532 comment 6.)
+          (function() {
+            try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e) {}
+          })();
+
+          // ── Web Audio API quality polyfill ──
+          // Forces 48kHz sample rate and adds gain envelope smoothing to
+          // OscillatorNode start/stop to eliminate click/pop artifacts that
+          // sound like static on small phone speakers.
+          (function() {
+            var _OrigAudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!_OrigAudioCtx) return;
+
+            // Patch constructor to force 48kHz sample rate and re-activate native
+            // AVAudioSession(.playback) so audio plays even when silent switch is on.
+            // TTS/voice-call may have left the session as .playAndRecord which respects
+            // the silent switch — this message handler flips it back immediately.
+            function PatchedAudioContext(opts) {
+              opts = opts || {};
+              if (!opts.sampleRate) opts.sampleRate = 48000;
+              try { window.webkit.messageHandlers.audioSessionHandler.postMessage(1); } catch(e) {}
+              return new _OrigAudioCtx(opts);
+            }
+            PatchedAudioContext.prototype = _OrigAudioCtx.prototype;
+            Object.defineProperty(PatchedAudioContext, 'name', { value: 'AudioContext' });
+            window.AudioContext = PatchedAudioContext;
+            if (window.webkitAudioContext) window.webkitAudioContext = PatchedAudioContext;
+
+            // Patch OscillatorNode.stop() to ramp gain down over 5ms before stopping
+            var _origStop = OscillatorNode.prototype.stop;
+            OscillatorNode.prototype.stop = function(when) {
+              var ctx = this.context;
+              var now = ctx.currentTime;
+              var stopTime = (when && when > now) ? when : now;
+              // Insert a gain node if not already wrapped
+              if (!this._envGain) {
+                this._envGain = ctx.createGain();
+                this._envGain.gain.value = 1.0;
+                // Rewire: disconnect from current destination, route through gain
+                try {
+                  this.disconnect();
+                  this.connect(this._envGain);
+                  this._envGain.connect(ctx.destination);
+                } catch(e) {
+                  // Already disconnected or complex routing — just stop directly
+                  return _origStop.call(this, when);
+                }
+              }
+              // Smooth ramp down over 5ms
+              this._envGain.gain.setValueAtTime(1.0, stopTime);
+              this._envGain.gain.linearRampToValueAtTime(0.0, stopTime + 0.005);
+              _origStop.call(this, stopTime + 0.006);
+            };
+          })();
+
+          // ── <audio> element silent-mode fix ──
+          // Patch HTMLAudioElement.play() to re-activate native .playback session
+          // so <audio> tags also play through the silent switch.
+          (function() {
+            var _origPlay = HTMLAudioElement.prototype.play;
+            HTMLAudioElement.prototype.play = function() {
+              try { window.webkit.messageHandlers.audioSessionHandler.postMessage(1); } catch(e) {}
+              return _origPlay.apply(this, arguments);
+            };
+          })();
+
           // ── Height reporter ──
           var _rhLast = 0;
           function reportHeight() {

@@ -129,9 +129,14 @@ final class StreamingContentStore {
         streamingError = error
     }
 
+    /// Callback invoked on @MainActor when the drain pipeline fully empties.
+    /// Set by the caller before `endStreaming()` to defer UI finalization until
+    /// all buffered tokens are displayed — prevents premature stop-button removal.
+    var drainCompletion: (@MainActor () -> Void)?
+
     /// Ends the streaming session gracefully.
     @discardableResult
-    func endStreaming() -> StreamingResult {
+    func endStreaming(onDrained: (@MainActor () -> Void)? = nil) -> StreamingResult {
         let result = StreamingResult(
             messageId: streamingMessageId,
             content: rawServerContent,
@@ -139,6 +144,7 @@ final class StreamingContentStore {
             sources: streamingSources,
             error: streamingError
         )
+        drainCompletion = onDrained
         let p = pipeline
         Task { await p?.finish() }
         return result
@@ -206,6 +212,11 @@ final class StreamingContentStore {
     }
 
     private func completeCleanup() {
+        // Capture and clear the drain completion before modifying any state,
+        // so it fires with the final display content still accessible.
+        let completion = drainCompletion
+        drainCompletion = nil
+
         pipeline = nil
         streamingMessageId = nil
         rawServerContent = ""
@@ -218,5 +229,10 @@ final class StreamingContentStore {
         streamingError = nil
         streamingModelId = nil
         isActive = false
+
+        // Fire drain completion AFTER state is clean so the callback's
+        // message.isStreaming = false and cleanupStreaming() see a fully
+        // idle store and don't re-trigger double cleanup.
+        completion?()
     }
 }

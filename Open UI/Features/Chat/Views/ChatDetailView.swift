@@ -55,6 +55,13 @@ struct ChatDetailView: View {
     // property stores — zero SwiftUI invalidation overhead.
     @State private var _scrollRefs = ScrollRefs()
 
+    /// Hard floor: auto-scroll cannot be disengaged by any scroll-geometry callback
+    /// while this date is in the future.  Set when the user sends a prompt, when
+    /// streaming starts, or when a regeneration begins — covering the window where
+    /// the "minHeight last-turn" layout trick causes large content-offset jumps that
+    /// would otherwise be mis-read as intentional upward drags.
+    @State private var autoScrollLockUntil: Date = .distantPast
+
     // MARK: Message pagination (sliding window — memory optimization)
     /// The ending index (exclusive) of the visible message window.
     /// `nil` means "pinned to latest" — the window always includes the newest messages.
@@ -1013,6 +1020,12 @@ struct ChatDetailView: View {
             // response streams in below it.
             isScrolledUp = false
             _scrollRefs.lastProgrammaticScrollTime = Date()
+            // Hold the auto-scroll lock: the "minHeight last-turn" layout trick
+            // causes a large, sudden content-height jump that the isStrongDrag
+            // bypass in onScrollGeometryChange would otherwise mis-read as an
+            // intentional upward drag — flipping isScrolledUp back to true before
+            // streaming even begins. The lock window outlasts any layout settling.
+            autoScrollLockUntil = Date().addingTimeInterval(1.5)
 
             if old == 0 {
                 // Bug 17: Delay first-message scroll by 250 ms so the welcome view's
@@ -1057,6 +1070,9 @@ struct ChatDetailView: View {
                 // during the active stream should re-enable the FAB.
                 isScrolledUp = false
                 _scrollRefs.lastProgrammaticScrollTime = Date()
+                // Lock auto-scroll for 1.2s from the start of streaming to cover
+                // the initial layout-churn window (WKWebViews, MarkdownView sizing).
+                autoScrollLockUntil = Date().addingTimeInterval(1.2)
                 scrollPosition.scrollTo(edge: .bottom)
             }
         }
@@ -1074,6 +1090,7 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.regenerateScrollToken) { _, _ in
             isScrolledUp = false
             _scrollRefs.lastProgrammaticScrollTime = Date()
+            autoScrollLockUntil = Date().addingTimeInterval(1.5)
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
@@ -1119,6 +1136,13 @@ struct ChatDetailView: View {
                 // User scrolled very close to the bottom — re-engage auto-scroll.
                 if isScrolledUp { isScrolledUp = false }
             } else {
+                // Hard floor: if we're inside the auto-scroll lock window (set on send /
+                // streaming start / regenerate), ignore ALL geometry callbacks that could
+                // flip isScrolledUp to true. The "minHeight last-turn" layout trick causes
+                // a large offset jump during this window that isStrongDrag would otherwise
+                // mis-classify as an intentional upward drag.
+                guard Date() >= autoScrollLockUntil else { return }
+
                 // Suppress false "user scrolled up" detection after any programmatic
                 // scroll. The scroll animation itself causes the offset to momentarily
                 // move in various directions, which would otherwise trigger

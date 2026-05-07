@@ -75,6 +75,10 @@ final class TextToSpeechService: NSObject {
     /// Set by VoiceCallViewModel to persist speaker routing through the TTS pipeline.
     var speakerOverrideEnabled: Bool = false
 
+    /// Port override to re-apply whenever the TTS service reconfigures the audio session.
+    /// Set by VoiceCallViewModel so earpiece/speaker routing survives session resets inside TTS.
+    var outputPortOverride: AVAudioSession.PortOverride = .none
+
     /// Tracks whether the TTS service itself has disabled the idle timer.
     /// Prevents re-enabling auto-lock while a voice call is already holding it.
     private var ttsHoldsIdleTimerLock: Bool = false
@@ -567,17 +571,22 @@ final class TextToSpeechService: NSObject {
         let speakerOverride = speakerOverrideEnabled
 
         // Configure audio session before starting the player.
-        // Voice call (.playAndRecord .voiceChat) keeps the mic alive; port routing is
-        // applied by VoiceCallViewModel.applySpeakerOverride() — don't force it here.
-        // Chat read-aloud (.playback) needs .allowBluetoothA2DP so A2DP earbuds receive
-        // audio after any prior HFP session (which disables A2DP without this option).
+        // Voice calls use .voiceChat mode for echo cancellation + HFP mic routing.
+        // All other TTS (chat read-aloud) uses the global baseline (.playAndRecord .default)
+        // so it ignores the silent switch and mixes with other app audio.
         let session = AVAudioSession.sharedInstance()
         if speakerOverride {
             try? session.setCategory(.playAndRecord, mode: .voiceChat,
-                                     options: [.allowBluetoothHFP, .allowBluetoothA2DP])
+                                     options: [.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers])
             try? session.setActive(true)
+            // setActive resets overrideOutputAudioPort — re-apply the current routing preference.
+            try? session.overrideOutputAudioPort(outputPortOverride)
         } else {
-            try? session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
+            // Global baseline: .playAndRecord ignores silent switch; .defaultToSpeaker routes
+            // to loud speaker; .mixWithOthers doesn't interrupt other app audio.
+            try? session.setCategory(.playAndRecord, mode: .default,
+                                     options: [.defaultToSpeaker, .allowBluetoothHFP,
+                                               .allowBluetoothA2DP, .mixWithOthers])
             try? session.setActive(true)
         }
 
@@ -756,16 +765,17 @@ final class TextToSpeechService: NSObject {
         do {
             let session = AVAudioSession.sharedInstance()
             if speakerOverrideEnabled {
-                // Voice call — keep mic+speaker active; port routing is applied by
-                // VoiceCallViewModel.applySpeakerOverride() so don't force-override here.
-                // .allowBluetoothHFP is required so BT HFP headsets stay connected.
+                // Voice call — .voiceChat mode enables echo cancellation + HFP mic routing.
                 try session.setCategory(.playAndRecord, mode: .voiceChat,
-                                        options: [.allowBluetoothHFP, .allowBluetoothA2DP])
+                                        options: [.allowBluetoothHFP, .allowBluetoothA2DP, .mixWithOthers])
                 try session.setActive(true)
+                // setActive resets overrideOutputAudioPort — re-apply earpiece/speaker preference.
+                try session.overrideOutputAudioPort(outputPortOverride)
             } else {
-                // Regular read-aloud — .allowBluetoothA2DP ensures A2DP earbuds receive audio
-                // even when a prior session used HFP mode (which disables A2DP by default).
-                try session.setCategory(.playback, mode: .default, options: [.allowBluetoothA2DP])
+                // Regular read-aloud — use global baseline so silent switch is ignored.
+                try session.setCategory(.playAndRecord, mode: .default,
+                                        options: [.defaultToSpeaker, .allowBluetoothHFP,
+                                                  .allowBluetoothA2DP, .mixWithOthers])
                 try session.setActive(true)
             }
         } catch {
