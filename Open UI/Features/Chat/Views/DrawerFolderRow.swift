@@ -21,6 +21,8 @@ struct DrawerFolderRow: View {
     var onDeleteChat: ((String) -> Void)?
     /// Called when a chat's pin state should be toggled.
     var onTogglePin: ((Conversation) -> Void)?
+    /// Called when a conversation should be permanently deleted (used in bulk delete).
+    var onDeleteConversation: ((String) async -> Void)?
     /// Indentation depth for subfolders (0 = root level)
     var depth: Int = 0
 
@@ -202,8 +204,9 @@ struct DrawerFolderRow: View {
                     .filter { $0.parentId == folder.id }
                     .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
+                // LazyVStack renders only visible rows — critical for large folders (100+ chats).
+                // Subfolders are kept outside the lazy section since they have variable height.
                 VStack(spacing: 0) {
-                    // Subfolders first (before chats, matching WebUI order)
                     ForEach(liveChildren) { child in
                         DrawerFolderRow(
                             folder: child,
@@ -220,7 +223,7 @@ struct DrawerFolderRow: View {
                         )
                     }
 
-                    // Chats inside this folder
+                    // Chats inside this folder — LazyVStack for O(visible) rendering
                     if validChats.isEmpty && liveFolder.chats.isEmpty && liveChildren.isEmpty {
                         // Still loading or genuinely empty
                         Text("No chats")
@@ -229,8 +232,26 @@ struct DrawerFolderRow: View {
                             .padding(.leading, CGFloat(depth + 2) * 12 + 12)
                             .padding(.vertical, Spacing.xs)
                     } else {
-                        ForEach(validChats) { chat in
-                            drawerChatRow(chat)
+                        // Selection mode header — shown when this folder is in selection mode
+                        let isThisFolderSelecting = folderVM.isFolderChatSelectionMode
+                            && folderVM.selectionFolderId == folder.id
+                        if isThisFolderSelecting {
+                            folderSelectionHeader(folder: liveFolder, validChats: validChats)
+                        }
+
+                        LazyVStack(spacing: 0) {
+                            ForEach(validChats) { chat in
+                                drawerChatRow(chat)
+                                    // Fixed height so LazyVStack can pre-calculate total size
+                                    // without measuring every off-screen row.
+                                    // Row = 12pt top padding + ~14pt font cap height + 12pt bottom = ~38pt
+                                    .frame(height: 38)
+                            }
+                        }
+
+                        // Selection mode action bar
+                        if isThisFolderSelecting {
+                            folderSelectionActionBar(folder: liveFolder)
                         }
                     }
                 }
@@ -240,118 +261,317 @@ struct DrawerFolderRow: View {
         .animation(.easeInOut(duration: AnimDuration.fast), value: folder.isExpanded)
     }
 
-    // MARK: - Chat Row Inside Folder
+    // MARK: - Folder Chat Selection Header
 
-    private func drawerChatRow(_ chat: Conversation) -> some View {
-        Button {
-            onSelectChat(chat.id)
-        } label: {
-            HStack(spacing: Spacing.sm) {
-                // Indent + accent bar — indent increases with subfolder depth
-                Rectangle()
-                    .fill(theme.brandPrimary.opacity(0.3))
-                    .frame(width: 2)
-                    .cornerRadius(1)
-                    .padding(.leading, 22 + CGFloat(depth) * 16)
-
-                Text(chat.title)
-                    .scaledFont(size: 14)
-                    .fontWeight(activeConversationId == chat.id ? .semibold : .regular)
-                    .foregroundStyle(
-                        activeConversationId == chat.id
-                            ? theme.textPrimary
-                            : theme.textSecondary
-                    )
-                    .lineLimit(1)
-
-                Spacer()
-            }
-            .padding(.vertical, 6)
-            .padding(.trailing, Spacing.sm)
-            .background(
-                activeConversationId == chat.id
-                    ? theme.brandPrimary.opacity(0.1)
-                    : Color.clear,
-                in: RoundedRectangle(cornerRadius: CornerRadius.sm)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        // Allow dragging out of folder
-        .draggable(DraggableChat(
-            conversationId: chat.id,
-            currentFolderId: folder.id
-        )) {
-            HStack(spacing: Spacing.xs) {
-                Image(systemName: "bubble.left").scaledFont(size: 12)
-                Text(chat.title)
-                    .scaledFont(size: 12, weight: .medium)
-                    .lineLimit(1)
-            }
-            .padding(.horizontal, Spacing.sm)
-            .padding(.vertical, Spacing.xs)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-        }
-        .contextMenu {
+    @ViewBuilder
+    private func folderSelectionHeader(folder: ChatFolder, validChats: [Conversation]) -> some View {
+        HStack(spacing: Spacing.sm) {
             Button {
-                onTogglePin?(chat)
+                folderVM.exitFolderChatSelectionMode()
             } label: {
-                Label(
-                    chat.pinned ? "Unpin" : "Pin",
-                    systemImage: chat.pinned ? "pin.slash" : "pin"
-                )
+                Text("Cancel")
+                    .scaledFont(size: 13, context: .list)
+                    .foregroundStyle(theme.brandPrimary)
             }
 
+            Spacer()
+
+            Text("\(folderVM.selectedFolderChatCount) selected")
+                .scaledFont(size: 12, weight: .semibold, context: .list)
+                .foregroundStyle(theme.textPrimary)
+
+            Spacer()
+
             Button {
-                let chatId = chat.id
-                Task {
-                    await folderVM.moveChat(conversation: chat, to: nil)
-                    onChatMoved?(chatId, nil)
+                if folderVM.selectedFolderChatCount == validChats.count {
+                    folderVM.selectedFolderChatIds.removeAll()
+                } else {
+                    folderVM.selectAllChats(in: folder.id)
                 }
             } label: {
-                Label("Remove from Folder", systemImage: "folder.badge.minus")
+                Text(folderVM.selectedFolderChatCount == validChats.count ? "Deselect All" : "Select All")
+                    .scaledFont(size: 11, weight: .medium, context: .list)
+                    .foregroundStyle(theme.brandPrimary)
             }
+        }
+        .padding(.horizontal, Spacing.sm)
+        .padding(.vertical, Spacing.xs)
+        .background(theme.surfaceContainer.opacity(0.6), in: RoundedRectangle(cornerRadius: CornerRadius.sm))
+        .padding(.horizontal, Spacing.sm)
+        .padding(.top, Spacing.xs)
+    }
 
-            let otherFolders = folderVM.folders.filter { $0.id != folder.id }
-            if !otherFolders.isEmpty {
-                Menu("Move to Folder") {
-                    ForEach(otherFolders) { other in
-                        Button {
-                            Task { await folderVM.moveChat(conversation: chat, to: other.id) }
-                        } label: {
-                            Label(other.name, systemImage: "folder")
+    // MARK: - Folder Chat Selection Action Bar
+
+    @ViewBuilder
+    private func folderSelectionActionBar(folder: ChatFolder) -> some View {
+        VStack(spacing: Spacing.xs) {
+            if folderVM.isBulkFolderChatOperating {
+                ProgressView()
+                    .padding(.vertical, Spacing.xs)
+            } else {
+                HStack(spacing: Spacing.xs) {
+                    // Remove from folder button
+                    Button {
+                        Task { await folderVM.removeSelectedChatsFromFolder() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.badge.minus")
+                                .scaledFont(size: 11)
+                            Text("Remove")
+                                .scaledFont(size: 12, weight: .medium, context: .list)
                         }
+                        .foregroundStyle(theme.textPrimary)
+                        .padding(.horizontal, Spacing.sm)
+                        .padding(.vertical, 6)
+                        .background(theme.surfaceContainer, in: RoundedRectangle(cornerRadius: CornerRadius.sm))
                     }
-                }
-            }
+                    .disabled(folderVM.selectedFolderChatCount == 0)
 
-            Button(role: .destructive) {
-                chatToDelete = chat
-            } label: {
-                Label("Delete", systemImage: "trash")
+                    // Move to folder button
+                    Menu {
+                        ForEach(folderVM.folders.filter { $0.id != folder.id }) { otherFolder in
+                            Button {
+                                Task {
+                                    let ids = folderVM.selectedFolderChatIds
+                                    let chatsToMove = folder.chats.filter { ids.contains($0.id) }
+                                    for chat in chatsToMove {
+                                        await folderVM.moveChat(conversation: chat, to: otherFolder.id)
+                                    }
+                                    folderVM.exitFolderChatSelectionMode()
+                                }
+                            } label: {
+                                Label(otherFolder.name, systemImage: "folder")
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.badge.plus")
+                                .scaledFont(size: 11)
+                            Text("Move to…")
+                                .scaledFont(size: 12, weight: .medium, context: .list)
+                        }
+                        .foregroundStyle(theme.textPrimary)
+                        .padding(.horizontal, Spacing.sm)
+                        .padding(.vertical, 6)
+                        .background(theme.surfaceContainer, in: RoundedRectangle(cornerRadius: CornerRadius.sm))
+                    }
+                    .disabled(folderVM.selectedFolderChatCount == 0 || folderVM.folders.filter { $0.id != folder.id }.isEmpty)
+
+                    Spacer()
+
+                    // Delete button
+                    Button(role: .destructive) {
+                        folderVM.showDeleteSelectedFolderChatsConfirmation = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "trash")
+                                .scaledFont(size: 11)
+                            Text("Delete")
+                                .scaledFont(size: 12, weight: .medium, context: .list)
+                        }
+                        .foregroundStyle(folderVM.selectedFolderChatCount > 0 ? Color.red : Color.red.opacity(0.4))
+                        .padding(.horizontal, Spacing.sm)
+                        .padding(.vertical, 6)
+                        .background(Color.red.opacity(0.1), in: RoundedRectangle(cornerRadius: CornerRadius.sm))
+                    }
+                    .disabled(folderVM.selectedFolderChatCount == 0)
+                }
+                .padding(.horizontal, Spacing.sm)
             }
         }
+        .padding(.vertical, Spacing.xs)
         .confirmationDialog(
-            "Delete \"\(chatToDelete?.title ?? chat.title)\"?",
-            isPresented: .init(
-                get: { chatToDelete?.id == chat.id },
-                set: { if !$0 { chatToDelete = nil } }
+            "Delete \(folderVM.selectedFolderChatCount) Chat(s)?",
+            isPresented: Binding(
+                get: { folderVM.showDeleteSelectedFolderChatsConfirmation },
+                set: { folderVM.showDeleteSelectedFolderChatsConfirmation = $0 }
             ),
             titleVisibility: .visible
         ) {
             Button("Delete", role: .destructive) {
-                if let toDelete = chatToDelete {
-                    chatToDelete = nil
-                    onDeleteChat?(toDelete.id)
+                Task {
+                    await folderVM.deleteSelectedFolderChats(
+                        folderId: folder.id,
+                        deleteConversation: { chatId in
+                            await onDeleteConversation?(chatId)
+                        }
+                    )
                 }
             }
-            Button("Cancel", role: .cancel) {
-                chatToDelete = nil
-            }
+            Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This action cannot be undone.")
+            Text("This will permanently delete the selected conversations. This action cannot be undone.")
         }
-        .accessibilityLabel(Text(chat.title))
-        .accessibilityHint(Text("Double tap to open. Drag to move between folders."))
+    }
+
+    // MARK: - Chat Row Inside Folder
+
+    private func drawerChatRow(_ chat: Conversation) -> some View {
+        let isSelecting = folderVM.isFolderChatSelectionMode && folderVM.selectionFolderId == folder.id
+        let isSelected = folderVM.isFolderChatSelected(chat.id)
+
+        return Group {
+            if isSelecting {
+                // Selection mode — tap toggles checkbox, no navigation
+                Button {
+                    Haptics.play(.light)
+                    folderVM.toggleFolderChatSelection(chat.id)
+                } label: {
+                    HStack(spacing: Spacing.sm) {
+                        // Checkbox
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .scaledFont(size: 16)
+                            .foregroundStyle(isSelected ? theme.brandPrimary : theme.textTertiary)
+                            .padding(.leading, 22 + CGFloat(depth) * 16)
+
+                        Text(chat.title)
+                            .scaledFont(size: 14)
+                            .foregroundStyle(isSelected ? theme.textPrimary : theme.textSecondary)
+                            .lineLimit(1)
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.trailing, Spacing.sm)
+                    .background(
+                        isSelected ? theme.brandPrimary.opacity(0.1) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: CornerRadius.sm)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(chat.title))
+                .accessibilityHint(Text(isSelected ? "Selected. Double tap to deselect." : "Double tap to select."))
+
+            } else {
+                // Normal mode — tap opens chat, long press enters selection mode
+                Button {
+                    onSelectChat(chat.id)
+                } label: {
+                    HStack(spacing: Spacing.sm) {
+                        // Indent + accent bar — indent increases with subfolder depth
+                        Rectangle()
+                            .fill(theme.brandPrimary.opacity(0.3))
+                            .frame(width: 2)
+                            .cornerRadius(1)
+                            .padding(.leading, 22 + CGFloat(depth) * 16)
+
+                        Text(chat.title)
+                            .scaledFont(size: 14)
+                            .fontWeight(activeConversationId == chat.id ? .semibold : .regular)
+                            .foregroundStyle(
+                                activeConversationId == chat.id
+                                    ? theme.textPrimary
+                                    : theme.textSecondary
+                            )
+                            .lineLimit(1)
+
+                        Spacer()
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.trailing, Spacing.sm)
+                    .background(
+                        activeConversationId == chat.id
+                            ? theme.brandPrimary.opacity(0.1)
+                            : Color.clear,
+                        in: RoundedRectangle(cornerRadius: CornerRadius.sm)
+                    )
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                // Allow dragging out of folder
+                .draggable(DraggableChat(
+                    conversationId: chat.id,
+                    currentFolderId: folder.id
+                )) {
+                    HStack(spacing: Spacing.xs) {
+                        Image(systemName: "bubble.left").scaledFont(size: 12)
+                        Text(chat.title)
+                            .scaledFont(size: 12, weight: .medium)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, Spacing.sm)
+                    .padding(.vertical, Spacing.xs)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .contextMenu {
+                    Button {
+                        folderVM.enterFolderChatSelectionMode(folderId: folder.id)
+                        folderVM.toggleFolderChatSelection(chat.id)
+                    } label: {
+                        Label("Select", systemImage: "checkmark.circle")
+                    }
+
+                    Divider()
+
+                    Button {
+                        onTogglePin?(chat)
+                    } label: {
+                        Label(
+                            chat.pinned ? "Unpin" : "Pin",
+                            systemImage: chat.pinned ? "pin.slash" : "pin"
+                        )
+                    }
+
+                    Button {
+                        let chatId = chat.id
+                        Task {
+                            await folderVM.moveChat(conversation: chat, to: nil)
+                            onChatMoved?(chatId, nil)
+                        }
+                    } label: {
+                        Label("Remove from Folder", systemImage: "folder.badge.minus")
+                    }
+
+                    let otherFolders = folderVM.folders.filter { $0.id != folder.id }
+                    if !otherFolders.isEmpty {
+                        Menu("Move to Folder") {
+                            ForEach(otherFolders) { other in
+                                Button {
+                                    Task { await folderVM.moveChat(conversation: chat, to: other.id) }
+                                } label: {
+                                    Label(other.name, systemImage: "folder")
+                                }
+                            }
+                        }
+                    }
+
+                    Button(role: .destructive) {
+                        chatToDelete = chat
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                }
+                .confirmationDialog(
+                    "Delete \"\(chatToDelete?.title ?? chat.title)\"?",
+                    isPresented: .init(
+                        get: { chatToDelete?.id == chat.id },
+                        set: { if !$0 { chatToDelete = nil } }
+                    ),
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete", role: .destructive) {
+                        if let toDelete = chatToDelete {
+                            chatToDelete = nil
+                            onDeleteChat?(toDelete.id)
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {
+                        chatToDelete = nil
+                    }
+                } message: {
+                    Text("This action cannot be undone.")
+                }
+                .accessibilityLabel(Text(chat.title))
+                .accessibilityHint(Text("Double tap to open. Drag to move between folders."))
+                // Long press enters selection mode for this folder
+                .onLongPressGesture {
+                    Haptics.play(.medium)
+                    folderVM.enterFolderChatSelectionMode(folderId: folder.id)
+                    folderVM.toggleFolderChatSelection(chat.id)
+                }
+            }
+        }
     }
 }

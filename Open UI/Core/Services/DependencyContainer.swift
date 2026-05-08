@@ -249,6 +249,10 @@ final class AppDependencyContainer: ServiceContainer {
     /// surfaces an update notice to the user when one is found.
     let updateChecker = UpdateChecker()
 
+    /// Checks the connected Open WebUI server for a newer server version and
+    /// surfaces a notice to the user when one is found.
+    let serverUpdateChecker = ServerUpdateChecker()
+
     /// Whether the server is currently reachable (delegated to connection monitor).
     var isServerReachable: Bool {
         connectionMonitor.connectionState == .connected

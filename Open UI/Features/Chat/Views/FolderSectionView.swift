@@ -223,7 +223,10 @@ struct FolderRow: View {
                 Spacer()
             }
         } else {
-            VStack(spacing: 0) {
+            // LazyVStack so only on-screen rows are rendered — handles folders with 100+ chats.
+            // Fixed height per row keeps total size predictable without off-screen measurement.
+            // Row height: 8pt top padding + 20pt title + 16pt timestamp/accent line + 8pt bottom ≈ 52pt
+            LazyVStack(spacing: 0) {
                 ForEach(folder.chats) { chat in
                     FolderChatRow(
                         conversation: chat,
@@ -238,6 +241,7 @@ struct FolderRow: View {
                         onDelete: { onDeleteChat?(chat.id) },
                         onTogglePin: { onTogglePin?(chat) }
                     )
+                    .frame(height: 52)
                 }
             }
             .padding(.leading, Spacing.lg + Spacing.sm) // Indent under folder
@@ -249,7 +253,7 @@ struct FolderRow: View {
 // MARK: - FolderChatRow
 
 /// A chat row rendered inside an expanded folder.
-/// Supports drag-out, navigation, and context menu.
+/// Supports drag-out, navigation, context menu, and multi-select mode.
 private struct FolderChatRow: View {
     let conversation: Conversation
     let folder: ChatFolder
@@ -264,7 +268,60 @@ private struct FolderChatRow: View {
     @Environment(\.theme) private var theme
     @State private var showDeleteConfirmation = false
 
+    private var isSelecting: Bool {
+        folderVM.isFolderChatSelectionMode && folderVM.selectionFolderId == folder.id
+    }
+    private var isSelected: Bool {
+        folderVM.isFolderChatSelected(conversation.id)
+    }
+
     var body: some View {
+        if isSelecting {
+            selectionRow
+        } else {
+            normalRow
+        }
+    }
+
+    // MARK: Selection Row
+    private var selectionRow: some View {
+        Button {
+            Haptics.play(.light)
+            folderVM.toggleFolderChatSelection(conversation.id)
+        } label: {
+            HStack(spacing: Spacing.sm) {
+                Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                    .scaledFont(size: 18)
+                    .foregroundStyle(isSelected ? theme.brandPrimary : theme.textTertiary)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(conversation.title)
+                        .scaledFont(size: 14)
+                        .fontWeight(.medium)
+                        .foregroundStyle(isSelected ? theme.textPrimary : theme.textPrimary)
+                        .lineLimit(1)
+
+                    Text(conversation.updatedAt.chatTimestamp)
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                }
+
+                Spacer()
+            }
+            .padding(.vertical, Spacing.sm)
+            .background(
+                isSelected ? theme.brandPrimary.opacity(0.08) : Color.clear,
+                in: RoundedRectangle(cornerRadius: CornerRadius.sm)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(conversation.title))
+        .accessibilityHint(Text(isSelected ? "Selected. Double tap to deselect." : "Double tap to select."))
+    }
+
+    // MARK: Normal Row
+    private var normalRow: some View {
         Button {
             onNavigate()
         } label: {
@@ -339,6 +396,15 @@ private struct FolderChatRow: View {
         // Context menu
         .contextMenu {
             Button {
+                folderVM.enterFolderChatSelectionMode(folderId: folder.id)
+                folderVM.toggleFolderChatSelection(conversation.id)
+            } label: {
+                Label(String(localized: "Select"), systemImage: "checkmark.circle")
+            }
+
+            Divider()
+
+            Button {
                 onTogglePin?()
             } label: {
                 Label(
@@ -385,6 +451,12 @@ private struct FolderChatRow: View {
             Text("This action cannot be undone.")
         }
         .accessibilityLabel(Text(conversation.title))
-        .accessibilityHint(Text("Double tap to open. Drag to move between folders."))
+        .accessibilityHint(Text("Double tap to open. Long press for options. Drag to move between folders."))
+        // Long press to enter selection mode
+        .onLongPressGesture {
+            Haptics.play(.medium)
+            folderVM.enterFolderChatSelectionMode(folderId: folder.id)
+            folderVM.toggleFolderChatSelection(conversation.id)
+        }
     }
 }

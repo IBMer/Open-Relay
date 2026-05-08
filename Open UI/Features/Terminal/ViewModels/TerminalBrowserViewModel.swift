@@ -4,11 +4,15 @@ import os.log
 /// Manages the state for the terminal file browser panel.
 ///
 /// Handles directory navigation, file operations (create, delete, upload, download),
-/// and command execution on the terminal server. All operations are proxied through
-/// the Open WebUI backend.
+/// and a **persistent bash shell session** on the terminal server.
+///
+/// The terminal works like a real terminal window: one bash process is started when
+/// the terminal opens, and all subsequent input is sent as stdin to that process via
+/// `POST /execute/{processId}/input`. This matches the Open WebUI web interface
+/// behaviour where each terminal window is a single persistent session.
 @MainActor @Observable
 final class TerminalBrowserViewModel {
-    // MARK: - State
+    // MARK: - File Browser State
 
     /// Current directory path being viewed.
     var currentPath: String = "/home/user"
@@ -21,16 +25,20 @@ final class TerminalBrowserViewModel {
     /// Navigation history for back navigation.
     var pathHistory: [String] = []
 
-    // MARK: - Command Runner State
+    // MARK: - Shell Session State
 
     /// Current command input text.
     var commandInput: String = ""
-    /// Command output history (prompt + output pairs).
-    var commandHistory: [CommandEntry] = []
-    /// Whether a command is currently executing.
-    var isExecutingCommand: Bool = false
+    /// Full terminal output accumulated since the session started.
+    var shellOutput: String = ""
+    /// Whether the shell session is in the process of being started.
+    var isShellStarting: Bool = false
+    /// Whether the shell process is currently running (ready for input).
+    var isShellReady: Bool = false
     /// Whether the terminal section is expanded.
     var isTerminalExpanded: Bool = false
+    /// Token used to force the scroll view to snap to the latest output.
+    var outputScrollToken: Int = 0
 
     // MARK: - Action State
 
@@ -48,6 +56,15 @@ final class TerminalBrowserViewModel {
     private var apiClient: APIClient?
     private var serverId: String = ""
     private let logger = Logger(subsystem: "com.openui", category: "TerminalBrowser")
+
+    /// The process ID of the currently running bash shell.
+    private var shellProcessId: String?
+    /// Background task that continuously polls the shell for new output.
+    private var shellPollingTask: Task<Void, Never>?
+    /// The next offset to use when polling for shell output.
+    private var shellOutputOffset: Int = 0
+
+    // MARK: - Computed
 
     /// Path segments for breadcrumb navigation.
     var pathSegments: [(name: String, path: String)] {
@@ -78,15 +95,20 @@ final class TerminalBrowserViewModel {
     /// Resets all state to defaults. Called when switching to a new chat
     /// so the file browser starts fresh.
     func reset() {
+        // Cancel the persistent shell before clearing state
+        stopShell()
+
         currentPath = "/home/user"
         items = []
         isLoading = false
         errorMessage = nil
         pathHistory = []
         commandInput = ""
-        commandHistory = []
-        isExecutingCommand = false
+        shellOutput = ""
+        isShellStarting = false
+        isShellReady = false
         isTerminalExpanded = false
+        outputScrollToken = 0
         showNewFolderAlert = false
         newFolderName = ""
         renamingFile = nil
@@ -199,90 +221,172 @@ final class TerminalBrowserViewModel {
         }
     }
 
-    // MARK: - Command Execution
+    // MARK: - Persistent Shell Session
 
-    /// Executes a command on the terminal server.
+    /// Starts a persistent bash shell session. Called automatically when the terminal
+    /// section is first expanded.
     ///
-    /// Uses the Open Terminal API's `wait` parameter for synchronous execution
-    /// of short commands, and offset-based polling for long-running commands.
-    func executeCommand(_ command: String) async {
+    /// Launches `bash` via `/execute`, stores the process ID, then starts a
+    /// background task that continuously polls for output using the offset-based
+    /// long-poll endpoint.
+    func startShell() async {
         guard let apiClient, !serverId.isEmpty else { return }
-        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !isShellReady, !isShellStarting else { return }
 
-        commandInput = ""
-        isExecutingCommand = true
-
-        let entry = CommandEntry(command: trimmed, output: "", isRunning: true)
-        commandHistory.append(entry)
-        let entryIndex = commandHistory.count - 1
+        isShellStarting = true
+        shellOutput = ""
+        shellOutputOffset = 0
 
         do {
-            // Execute with wait=10 — short commands will complete inline
             let result = try await apiClient.terminalExecute(
-                serverId: serverId, command: trimmed, cwd: currentPath
+                serverId: serverId,
+                command: "bash",
+                cwd: currentPath
             )
-
-            // Update output from the initial response
-            commandHistory[entryIndex].output = result.output
-
-            if result.isRunning {
-                // Long-running command — poll with offset-based incremental reads
-                var currentOffset = result.nextOffset
-                var attempts = 0
-                while attempts < 30 { // Max ~150 seconds (30 × 5s wait)
-                    let status = try await apiClient.terminalGetCommandStatus(
-                        serverId: serverId,
-                        processId: result.id,
-                        offset: currentOffset
-                    )
-                    // Append only new output (offset-based, no duplication)
-                    if !status.output.isEmpty {
-                        commandHistory[entryIndex].output += status.output
-                    }
-                    currentOffset = status.nextOffset
-
-                    if !status.isRunning {
-                        commandHistory[entryIndex].isRunning = false
-                        commandHistory[entryIndex].exitCode = status.exitCode
-                        break
-                    }
-                    attempts += 1
-                }
-                if attempts >= 30 {
-                    commandHistory[entryIndex].output += "\n[Timed out after ~150s]"
-                    commandHistory[entryIndex].isRunning = false
-                }
-            } else {
-                // Command already finished — update final state
-                commandHistory[entryIndex].isRunning = false
-                commandHistory[entryIndex].exitCode = result.exitCode
+            shellProcessId = result.id
+            shellOutputOffset = result.nextOffset
+            if !result.output.isEmpty {
+                appendOutput(result.output)
             }
-
-            // If the command was a cd, update the current path
-            if trimmed.hasPrefix("cd ") {
-                let target = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                if !target.isEmpty {
-                    // Re-fetch current directory to pick up the changed path
-                    await loadDirectory()
-                }
-            }
+            isShellReady = true
+            isShellStarting = false
+            logger.info("Shell started — processId: \(result.id)")
+            startPollingShell()
         } catch {
-            commandHistory[entryIndex].output = "Error: \(error.localizedDescription)"
-            commandHistory[entryIndex].isRunning = false
+            isShellStarting = false
+            isShellReady = false
+            appendOutput("\r\n[Failed to start shell: \(error.localizedDescription)]\r\n")
+            logger.error("Failed to start shell: \(error.localizedDescription)")
+        }
+    }
+
+    /// Sends a line of text as stdin to the running bash process.
+    ///
+    /// The input is appended with `\n` so the shell treats it as an Enter press.
+    /// If the user types "clear", the local output buffer is cleared immediately
+    /// for a snappy feel (the server may or may not honour ANSI clear).
+    func sendInput(_ text: String) {
+        guard let apiClient, !serverId.isEmpty else { return }
+        guard let processId = shellProcessId else {
+            // Shell not yet started — start it first then send input
+            Task {
+                await startShell()
+                sendInput(text)
+            }
+            return
         }
 
-        isExecutingCommand = false
+        // Echo input locally so the user sees what they typed
+        commandInput = ""
+        appendOutput("\r\n$ \(text)")
+
+        // Handle "clear" locally for instant feedback
+        if text.trimmingCharacters(in: .whitespacesAndNewlines) == "clear" {
+            shellOutput = ""
+            outputScrollToken += 1
+        }
+
+        Task {
+            do {
+                try await apiClient.terminalSendInput(
+                    serverId: serverId,
+                    processId: processId,
+                    input: text + "\n"
+                )
+            } catch {
+                appendOutput("\r\n[Input error: \(error.localizedDescription)]")
+                logger.error("sendInput error: \(error.localizedDescription)")
+            }
+        }
     }
-}
 
-// MARK: - Command Entry
+    /// Clears the on-screen terminal output buffer.
+    func clearOutput() {
+        shellOutput = ""
+        outputScrollToken += 1
+    }
 
-/// A single command + output pair in the terminal history.
-struct CommandEntry: Identifiable {
-    let id = UUID()
-    let command: String
-    var output: String
-    var isRunning: Bool
-    var exitCode: Int?
+    // MARK: - Private Shell Helpers
+
+    private func startPollingShell() {
+        shellPollingTask?.cancel()
+        shellPollingTask = Task {
+            await pollShellOutput()
+        }
+    }
+
+    private func stopShell() {
+        shellPollingTask?.cancel()
+        shellPollingTask = nil
+        shellProcessId = nil
+        isShellReady = false
+        isShellStarting = false
+    }
+
+    /// Continuously long-polls for new output from the running bash process.
+    ///
+    /// Uses offset-based polling: each call to `terminalGetCommandStatus` returns
+    /// only the output produced since the last read. When the process exits (unlikely
+    /// for a bash session), the loop terminates.
+    private func pollShellOutput() async {
+        guard let apiClient else { return }
+
+        while !Task.isCancelled {
+            guard let processId = shellProcessId else { break }
+
+            do {
+                let status = try await apiClient.terminalGetCommandStatus(
+                    serverId: serverId,
+                    processId: processId,
+                    offset: shellOutputOffset
+                )
+
+                if !status.output.isEmpty {
+                    appendOutput(status.output)
+                }
+                shellOutputOffset = status.nextOffset
+
+                if !status.isRunning {
+                    // Bash exited — offer to restart
+                    appendOutput("\r\n[Shell session ended]\r\n")
+                    isShellReady = false
+                    shellProcessId = nil
+                    logger.info("Shell process exited.")
+                    break
+                }
+            } catch {
+                if Task.isCancelled { break }
+                logger.error("Poll error: \(error.localizedDescription)")
+                // Brief back-off before retrying after a network error
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
+    }
+
+    /// Appends text to the output buffer and bumps the scroll token.
+    ///
+    /// Filters out known harmless bash warnings that appear when bash runs
+    /// without a PTY (pseudo-terminal). These are not real errors — they are
+    /// standard output from bash in containerised/non-interactive environments.
+    private func appendOutput(_ text: String) {
+        let filtered = filterBashWarnings(text)
+        guard !filtered.isEmpty else { return }
+        shellOutput += filtered
+        outputScrollToken += 1
+    }
+
+    /// Strips lines that are known harmless bash non-PTY startup warnings.
+    private func filterBashWarnings(_ text: String) -> String {
+        let suppressedPrefixes = [
+            "bash: cannot set terminal process group",
+            "bash: no job control in this shell"
+        ]
+        // Split on both \r\n and \n, filter, then rejoin with \r\n
+        let lines = text.components(separatedBy: "\n")
+        let kept = lines.filter { line in
+            let trimmed = line.trimmingCharacters(in: .init(charactersIn: "\r "))
+            return !suppressedPrefixes.contains { trimmed.hasPrefix($0) }
+        }
+        return kept.joined(separator: "\n")
+    }
 }

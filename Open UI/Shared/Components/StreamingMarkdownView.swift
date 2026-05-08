@@ -943,7 +943,10 @@ struct MarkdownWithLoading: View {
     var body: some View {
         let text = content ?? ""
         if isLoading && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            TypingIndicator()
+            HStack {
+                TypingIndicator()
+                Spacer()
+            }
         } else {
             StreamingMarkdownView(content: text, isStreaming: isLoading)
         }

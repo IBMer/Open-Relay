@@ -1,15 +1,25 @@
 # Changelog
 
-## v4.1 — May 6, 2026
+## v4.1 — May 8, 2026
 
 ### What's New
+- Long-press any chat inside a folder to enter selection mode — multi-select, then remove from folder, move to another folder, or delete in bulk.
+- Added "Move to Folder" button in the main chat list's selection toolbar — select multiple chats and move them all into a folder at once.
+- Added server update notifications — the app now checks your Open WebUI server for available updates on launch. A "Check for Server Updates" button is also available in About → Server.
 - Image size reduction - 5mb cap on vision models cause error if the image is too big.
 - Native visualizations now support audio output.
 
 ### Improvements
 - Minor code block performance improvements.
+- Removed "Clear Local Cache" option from Privacy & Security settings as Storage Menu covers it all.
 
 ### Bug Fixes
+- Terminal now runs as a persistent bash session with proper stdin support; suppressed harmless startup warnings
+- Fixed terminal remaining active for the model after disabling it — the model no longer receives terminal access when the toggle is off
+- Fixed admin-disabled terminal servers appearing as available and being silently used in requests
+- Fixed multi-server terminal: switching servers with the toggle off no longer leaves a stale server selected that could re-activate on the next enable
+- Fixed folders only showing up to 10 chats — now loads all chats across all pages smoothly
+- Fixed typing indicator animation
 - Fixed update notice incorrectly triggering based on GitHub tags instead of the actual App Store version.
 
 ## Previous Builds

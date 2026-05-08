@@ -41,9 +41,21 @@ final class FolderManager: @unchecked Sendable {
         return folder
     }
 
-    /// Fetches the conversations inside a specific folder (page 1).
+    /// Fetches ALL conversations inside a folder by iterating pages until the server returns empty.
+    /// Each page typically contains 10 items (server default). We keep fetching until we get
+    /// an empty page, ensuring the full list is always displayed.
     func fetchChatsInFolder(folderId: String) async throws -> [Conversation] {
-        try await apiClient.getChatsInFolder(folderId: folderId)
+        var allChats: [Conversation] = []
+        var page = 1
+        while true {
+            let batch = try await apiClient.getChatsInFolder(folderId: folderId, page: page)
+            guard !batch.isEmpty else { break }
+            allChats.append(contentsOf: batch)
+            // If the batch is smaller than a full page it's the last page
+            if batch.count < 10 { break }
+            page += 1
+        }
+        return allChats
     }
 
     // MARK: - Create

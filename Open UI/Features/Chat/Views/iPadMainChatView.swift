@@ -706,6 +706,7 @@ struct iPadSidebarContent: View {
 
     @Environment(\.theme) private var theme
     @State private var drawerChatsDropActive = false
+    @State private var showMoveSelectedToFolderSheet = false
 
     /// Top-level section collapse states (shared with iPhone via same AppStorage keys).
     @AppStorage("sidebar_folders_expanded") private var foldersExpanded: Bool = true
@@ -1083,6 +1084,13 @@ struct iPadSidebarContent: View {
                         },
                         onTogglePin: { conversation in
                             Task { await listViewModel.togglePin(conversation: conversation) }
+                        },
+                        onDeleteConversation: { chatId in
+                            await listViewModel.deleteConversation(id: chatId)
+                            for fIdx in folderVM.folders.indices {
+                                folderVM.folders[fIdx].chats.removeAll { $0.id == chatId }
+                            }
+                            if activeConversationId == chatId { onNewChat() }
                         }
                     )
                     .padding(.horizontal, Spacing.sm)
@@ -1499,25 +1507,70 @@ struct iPadSidebarContent: View {
     // MARK: - Bottom Bars
 
     private var selectionBottomBar: some View {
-        Button(role: .destructive) {
-            showDeleteSelectedConfirmation = true
-        } label: {
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: "trash")
-                Text("Delete (\(listViewModel.selectedCount))")
+        VStack(spacing: Spacing.sm) {
+            // Move to Folder button
+            Button {
+                showMoveSelectedToFolderSheet = true
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "folder.badge.plus")
+                    Text("Move to Folder (\(listViewModel.selectedCount))")
+                }
+                .scaledFont(size: 14, weight: .medium, context: .list)
+                .fontWeight(.semibold)
+                .foregroundStyle(listViewModel.selectedCount > 0 ? theme.brandPrimary : theme.brandPrimary.opacity(0.4))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Spacing.sm)
+                .background(
+                    listViewModel.selectedCount > 0
+                        ? theme.brandPrimary.opacity(0.12)
+                        : theme.brandPrimary.opacity(0.05)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
             }
-            .scaledFont(size: 14, weight: .medium, context: .list)
-            .fontWeight(.semibold)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, Spacing.sm)
-            .background(listViewModel.selectedCount > 0 ? Color.red : Color.red.opacity(0.3))
-            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+            .disabled(listViewModel.selectedCount == 0)
+
+            // Delete button
+            Button(role: .destructive) {
+                showDeleteSelectedConfirmation = true
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "trash")
+                    Text("Delete Selected (\(listViewModel.selectedCount))")
+                }
+                .scaledFont(size: 14, weight: .medium, context: .list)
+                .fontWeight(.semibold)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Spacing.sm)
+                .background(listViewModel.selectedCount > 0 ? Color.red : Color.red.opacity(0.3))
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+            }
+            .disabled(listViewModel.selectedCount == 0)
         }
-        .disabled(listViewModel.selectedCount == 0)
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, Spacing.md)
         .background(theme.surfaceContainer.opacity(0.3))
+        .sheet(isPresented: $showMoveSelectedToFolderSheet) {
+            MoveToFolderSheet(
+                folders: listViewModel.folderViewModel.folders,
+                selectedCount: listViewModel.selectedCount
+            ) { targetFolderId in
+                let selectedIds = listViewModel.selectedConversationIds
+                let folderVM = listViewModel.folderViewModel
+                Task {
+                    for id in selectedIds {
+                        if let conversation = listViewModel.conversations.first(where: { $0.id == id }) {
+                            if let idx = listViewModel.conversations.firstIndex(where: { $0.id == id }) {
+                                listViewModel.conversations[idx].folderId = targetFolderId
+                            }
+                            await folderVM.moveChat(conversation: conversation, to: targetFolderId)
+                        }
+                    }
+                }
+                listViewModel.exitSelectionMode()
+            }
+        }
     }
 
     private var sidebarBottomBar: some View {
@@ -1561,16 +1614,26 @@ struct iPadSidebarContent: View {
 
                 Spacer()
 
-                // Update available icon — only visible when an update is pending
-                if dependencies.updateChecker.pendingUpdate != nil {
+                // Update available icon — visible when app or server update is pending
+                if dependencies.updateChecker.pendingUpdate != nil || dependencies.serverUpdateChecker.pendingUpdate != nil {
                     Button {
                         dependencies.updateChecker.reopenUpdate()
+                        dependencies.serverUpdateChecker.reopenUpdate()
                     } label: {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .scaledFont(size: 15, weight: .medium)
-                            .foregroundStyle(.tint)
-                            .frame(width: 36, height: 36)
-                            .contentShape(Rectangle())
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .scaledFont(size: 15, weight: .medium)
+                                .foregroundStyle(.tint)
+                            // Extra dot badge when both updates are pending
+                            if dependencies.updateChecker.pendingUpdate != nil && dependencies.serverUpdateChecker.pendingUpdate != nil {
+                                Circle()
+                                    .fill(Color.blue)
+                                    .frame(width: 6, height: 6)
+                                    .offset(x: 2, y: -2)
+                            }
+                        }
+                        .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                     }
                     .accessibilityLabel("Update Available")
                     .transition(.scale.combined(with: .opacity))

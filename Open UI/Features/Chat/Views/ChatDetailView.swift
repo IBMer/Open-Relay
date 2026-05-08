@@ -3540,7 +3540,10 @@ private struct IsolatedAssistantMessage: View {
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
 
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            TypingIndicator()
+            HStack {
+                TypingIndicator()
+                Spacer()
+            }
         } else if isActivelyStreaming && streamingStore.frozenBoundary > 0 {
 
 

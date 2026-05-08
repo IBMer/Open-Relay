@@ -54,8 +54,16 @@ struct TerminalBrowserView: View {
             terminalToggleBar
         }
         .background(theme.background)
+        .onChange(of: viewModel.isTerminalExpanded) { _, expanded in
+            if expanded && !viewModel.isShellReady && !viewModel.isShellStarting {
+                Task { await viewModel.startShell() }
+            }
+        }
         .task {
             await viewModel.loadDirectory()
+        }
+        .onDisappear {
+            // Don't stop the shell on disappear — keep session alive while panel is closed
         }
         .alert("New Folder", isPresented: $viewModel.showNewFolderAlert) {
             TextField("Folder name", text: $viewModel.newFolderName)
@@ -418,6 +426,18 @@ struct TerminalBrowserView: View {
                     .scaledFont(size: 13, weight: .semibold)
                 Text("Terminal")
                     .scaledFont(size: 13, weight: .semibold)
+
+                if viewModel.isShellStarting {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .padding(.leading, 2)
+                } else if viewModel.isShellReady {
+                    Circle()
+                        .fill(.green)
+                        .frame(width: 6, height: 6)
+                        .padding(.leading, 2)
+                }
+
                 Spacer()
                 Image(systemName: viewModel.isTerminalExpanded ? "chevron.down" : "chevron.up")
                     .scaledFont(size: 11, weight: .bold)
@@ -434,66 +454,72 @@ struct TerminalBrowserView: View {
 
     private var terminalSection: some View {
         VStack(spacing: 0) {
-            // Command output — uses flexible height to fill available space
+            // Toolbar: clear button
+            HStack {
+                Spacer()
+                Button {
+                    viewModel.clearOutput()
+                    Haptics.play(.light)
+                } label: {
+                    Label("Clear", systemImage: "trash")
+                        .scaledFont(size: 11, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 12)
+                .padding(.vertical, 4)
+
+                if !viewModel.isShellReady && !viewModel.isShellStarting {
+                    Button {
+                        Task { await viewModel.startShell() }
+                        Haptics.play(.light)
+                    } label: {
+                        Label("Restart", systemImage: "arrow.clockwise")
+                            .scaledFont(size: 11, weight: .medium)
+                            .foregroundStyle(theme.brandPrimary)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.trailing, 12)
+                    .padding(.vertical, 4)
+                }
+            }
+            .background(Color.black.opacity(0.15))
+
+            // Shell output — single continuous buffer
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 4) {
-                        ForEach(viewModel.commandHistory) { entry in
-                            VStack(alignment: .leading, spacing: 2) {
-                                // Prompt + command
-                                HStack(spacing: 4) {
-                                    Text("$")
-                                        .foregroundStyle(.green)
-                                    Text(entry.command)
-                                        .foregroundStyle(theme.textPrimary)
-                                }
-                                .scaledFont(size: 12, design: .monospaced)
-
-                                // Output
-                                if !entry.output.isEmpty {
-                                    Text(entry.output)
-                                        .scaledFont(size: 11, design: .monospaced)
-                                        .foregroundStyle(theme.textSecondary)
-                                        .textSelection(.enabled)
-                                }
-
-                                if entry.isRunning {
-                                    ProgressView()
-                                        .controlSize(.mini)
-                                        .padding(.top, 2)
-                                }
-                            }
-                            .id(entry.id)
-                        }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
+                    Text(viewModel.shellOutput.isEmpty ? " " : viewModel.shellOutput)
+                        .scaledFont(size: 11, design: .monospaced)
+                        .foregroundStyle(Color.green.opacity(0.9))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .id("output")
                 }
                 .frame(minHeight: 200, maxHeight: 350)
-                .background(Color.black.opacity(0.3))
-                .onChange(of: viewModel.commandHistory.count) { _, _ in
-                    if let last = viewModel.commandHistory.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
-                    }
+                .background(Color.black.opacity(0.85))
+                .onChange(of: viewModel.outputScrollToken) { _, _ in
+                    proxy.scrollTo("output", anchor: .bottom)
                 }
             }
 
-            // Command input — uses UIKit UITextField for proper return key handling.
-            // Return key executes the command without dismissing the keyboard.
+            // Input row — stdin sent to the running bash process
             HStack(spacing: 8) {
-                Text("$")
+                Text(viewModel.isShellReady ? "$" : "…")
                     .scaledFont(size: 14, design: .monospaced)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(viewModel.isShellReady ? .green : .yellow)
 
                 TerminalTextField(
                     text: $viewModel.commandInput,
                     textColor: UIColor(theme.textPrimary),
                     onReturn: {
-                        let cmd = viewModel.commandInput
-                        Task { await viewModel.executeCommand(cmd) }
+                        let input = viewModel.commandInput
+                        viewModel.sendInput(input)
                     }
                 )
                 .frame(height: 28)
+                .disabled(!viewModel.isShellReady)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)

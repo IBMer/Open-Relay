@@ -546,21 +546,30 @@ struct RootView: View {
             dependencies.startServerConnectionMonitor()
         }
         .task {
-            // Check for app updates from GitHub releases.
-            // Runs once after authentication; throttled to at most once every 6 hours.
-            await dependencies.updateChecker.checkForUpdates()
+            // Check for app updates (App Store) and server updates in parallel.
+            // Runs once after authentication on every app launch.
+            async let appCheck: () = dependencies.updateChecker.checkForUpdates()
+            async let serverCheck: () = dependencies.serverUpdateChecker.checkForUpdates(using: dependencies.apiClient)
+            _ = await (appCheck, serverCheck)
         }
-        .sheet(item: Binding(
-            get: { dependencies.updateChecker.availableUpdate },
-            set: { if $0 == nil { dependencies.updateChecker.dismissUpdate() } }
-        )) { update in
-            UpdateAvailableSheet(
-                update: update,
-                onUpdate: {
-                    // Sheet's own button opens the App Store — nothing extra needed here
-                },
+        .sheet(isPresented: Binding(
+            get: {
+                dependencies.updateChecker.availableUpdate != nil ||
+                dependencies.serverUpdateChecker.availableUpdate != nil
+            },
+            set: { isPresented in
+                if !isPresented {
+                    dependencies.updateChecker.dismissUpdate()
+                    dependencies.serverUpdateChecker.dismissUpdate()
+                }
+            }
+        )) {
+            CombinedUpdateSheet(
+                appUpdate: dependencies.updateChecker.availableUpdate,
+                serverUpdate: dependencies.serverUpdateChecker.availableUpdate,
                 onDismiss: {
                     dependencies.updateChecker.dismissUpdate()
+                    dependencies.serverUpdateChecker.dismissUpdate()
                 }
             )
             .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)

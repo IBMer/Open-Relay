@@ -6,6 +6,7 @@ struct AboutView: View {
     @Environment(\.theme) private var theme
     @Environment(AppDependencyContainer.self) private var dependencies
     @State private var showUpToDate = false
+    @State private var showServerUpToDate = false
 
     private var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
@@ -35,11 +36,8 @@ struct AboutView: View {
                     if let version = viewModel.serverVersion {
                         detailRow(label: "Server Version", value: version)
                     }
-                    detailRow(
-                        label: "URL",
-                        value: viewModel.serverURL,
-                        showDivider: false
-                    )
+                    detailRow(label: "URL", value: viewModel.serverURL)
+                    checkForServerUpdatesRow
                 }
 
                 // Links
@@ -112,16 +110,66 @@ struct AboutView: View {
             .padding(.vertical, Spacing.lg)
         }
         .background(theme.background)
-        .sheet(item: Binding(
-            get: { dependencies.updateChecker.availableUpdate },
-            set: { if $0 == nil { dependencies.updateChecker.dismissUpdate() } }
-        )) { update in
-            UpdateAvailableSheet(
-                update: update,
-                onUpdate: { },
-                onDismiss: { dependencies.updateChecker.dismissUpdate() }
+        .sheet(isPresented: Binding(
+            get: {
+                dependencies.updateChecker.availableUpdate != nil ||
+                dependencies.serverUpdateChecker.availableUpdate != nil
+            },
+            set: { if !$0 {
+                dependencies.updateChecker.dismissUpdate()
+                dependencies.serverUpdateChecker.dismissUpdate()
+            }}
+        )) {
+            CombinedUpdateSheet(
+                appUpdate: dependencies.updateChecker.availableUpdate,
+                serverUpdate: dependencies.serverUpdateChecker.availableUpdate,
+                onDismiss: {
+                    dependencies.updateChecker.dismissUpdate()
+                    dependencies.serverUpdateChecker.dismissUpdate()
+                }
             )
             .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+        }
+    }
+
+    // MARK: - Check for Server Updates Row
+
+    @ViewBuilder
+    private var checkForServerUpdatesRow: some View {
+        let checker = dependencies.serverUpdateChecker
+        VStack(spacing: 0) {
+            Button {
+                Task { await checker.checkForUpdatesManually(using: dependencies.apiClient) }
+                showServerUpToDate = false
+            } label: {
+                HStack {
+                    Text("Check for Server Updates")
+                        .scaledFont(size: 14)
+                        .foregroundStyle(theme.textPrimary)
+                    Spacer()
+                    if checker.isChecking {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                    } else if showServerUpToDate && checker.availableUpdate == nil {
+                        Label("Up to date", systemImage: "checkmark.circle.fill")
+                            .scaledFont(size: 12)
+                            .foregroundStyle(.green)
+                            .labelStyle(.titleAndIcon)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .foregroundStyle(theme.textTertiary)
+                            .scaledFont(size: 14)
+                    }
+                }
+                .padding(.horizontal, Spacing.md)
+                .padding(.vertical, Spacing.chatBubblePadding)
+            }
+            .disabled(checker.isChecking)
+            .onChange(of: checker.isChecking) { _, isChecking in
+                if !isChecking {
+                    showServerUpToDate = true
+                }
+            }
         }
     }
 

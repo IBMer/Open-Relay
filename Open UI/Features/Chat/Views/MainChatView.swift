@@ -74,6 +74,9 @@ struct MainChatView: View {
     /// Controls the "delete selected" confirmation dialog.
     @State private var showDeleteSelectedConfirmation = false
 
+    /// Controls the "move selected to folder" sheet.
+    @State private var showMoveSelectedToFolderSheet = false
+
     /// Single-conversation delete confirmation (from drawer context menu).
     @State private var deletingConversation: Conversation?
 
@@ -1886,6 +1889,15 @@ struct MainChatView: View {
                         },
                         onTogglePin: { conversation in
                             Task { await listViewModel.togglePin(conversation: conversation) }
+                        },
+                        onDeleteConversation: { chatId in
+                            await listViewModel.deleteConversation(id: chatId)
+                            for fIdx in folderVM.folders.indices {
+                                folderVM.folders[fIdx].chats.removeAll { $0.id == chatId }
+                            }
+                            if activeConversationId == chatId {
+                                startNewChat()
+                            }
                         }
                     )
                     .padding(.horizontal, Spacing.sm)
@@ -2248,29 +2260,74 @@ struct MainChatView: View {
     // MARK: - Selection Mode Bottom Bar
 
     private var selectionModeBottomBar: some View {
-        Button(role: .destructive) {
-            showDeleteSelectedConfirmation = true
-        } label: {
-            HStack(spacing: Spacing.sm) {
-                Image(systemName: "trash")
-                Text("Delete Selected (\(listViewModel.selectedCount))")
+        VStack(spacing: Spacing.sm) {
+            // Move to Folder button
+            Button {
+                showMoveSelectedToFolderSheet = true
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "folder.badge.plus")
+                    Text("Move to Folder (\(listViewModel.selectedCount))")
+                }
+                .scaledFont(size: 14, weight: .medium, context: .list)
+                .fontWeight(.semibold)
+                .foregroundStyle(listViewModel.selectedCount > 0 ? theme.brandPrimary : theme.brandPrimary.opacity(0.4))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Spacing.sm)
+                .background(
+                    listViewModel.selectedCount > 0
+                        ? theme.brandPrimary.opacity(0.12)
+                        : theme.brandPrimary.opacity(0.05)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
             }
-            .scaledFont(size: 14, weight: .medium, context: .list)
-            .fontWeight(.semibold)
-            .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, Spacing.sm)
-            .background(
-                listViewModel.selectedCount > 0
-                    ? Color.red
-                    : Color.red.opacity(0.3)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+            .disabled(listViewModel.selectedCount == 0)
+
+            // Delete button
+            Button(role: .destructive) {
+                showDeleteSelectedConfirmation = true
+            } label: {
+                HStack(spacing: Spacing.sm) {
+                    Image(systemName: "trash")
+                    Text("Delete Selected (\(listViewModel.selectedCount))")
+                }
+                .scaledFont(size: 14, weight: .medium, context: .list)
+                .fontWeight(.semibold)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Spacing.sm)
+                .background(
+                    listViewModel.selectedCount > 0
+                        ? Color.red
+                        : Color.red.opacity(0.3)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+            }
+            .disabled(listViewModel.selectedCount == 0)
         }
-        .disabled(listViewModel.selectedCount == 0)
         .padding(.horizontal, Spacing.md)
         .padding(.vertical, Spacing.md)
         .background(theme.surfaceContainer.opacity(0.3))
+        .sheet(isPresented: $showMoveSelectedToFolderSheet) {
+            MoveToFolderSheet(
+                folders: listViewModel.folderViewModel.folders,
+                selectedCount: listViewModel.selectedCount
+            ) { targetFolderId in
+                let selectedIds = listViewModel.selectedConversationIds
+                let folderVM = listViewModel.folderViewModel
+                Task {
+                    for id in selectedIds {
+                        if let conversation = listViewModel.conversations.first(where: { $0.id == id }) {
+                            if let idx = listViewModel.conversations.firstIndex(where: { $0.id == id }) {
+                                listViewModel.conversations[idx].folderId = targetFolderId
+                            }
+                            await folderVM.moveChat(conversation: conversation, to: targetFolderId)
+                        }
+                    }
+                }
+                listViewModel.exitSelectionMode()
+            }
+        }
     }
 
     // MARK: - Drawer Bottom Bar
@@ -2318,17 +2375,27 @@ struct MainChatView: View {
 
                 Spacer()
 
-                // Update available icon — only visible when an update is pending
-                if dependencies.updateChecker.pendingUpdate != nil {
+                // Update available icon — visible when app or server update is pending
+                if dependencies.updateChecker.pendingUpdate != nil || dependencies.serverUpdateChecker.pendingUpdate != nil {
                     Button {
                         closeDrawer()
                         dependencies.updateChecker.reopenUpdate()
+                        dependencies.serverUpdateChecker.reopenUpdate()
                     } label: {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .scaledFont(size: 16, weight: .medium)
-                            .foregroundStyle(.tint)
-                            .frame(width: 40, height: 40)
-                            .contentShape(Rectangle())
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .scaledFont(size: 16, weight: .medium)
+                                .foregroundStyle(.tint)
+                            // Extra dot badge when both updates are pending
+                            if dependencies.updateChecker.pendingUpdate != nil && dependencies.serverUpdateChecker.pendingUpdate != nil {
+                                Circle()
+                                    .fill(Color.blue)
+                                    .frame(width: 7, height: 7)
+                                    .offset(x: 2, y: -2)
+                            }
+                        }
+                        .frame(width: 40, height: 40)
+                        .contentShape(Rectangle())
                     }
                     .accessibilityLabel("Update Available")
                     .transition(.scale.combined(with: .opacity))

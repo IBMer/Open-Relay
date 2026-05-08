@@ -165,6 +165,14 @@ struct ChatListView: View {
                     )
                 }
 
+                Button {
+                    viewModel.showMoveToFolderSheet = true
+                } label: {
+                    Image(systemName: "folder.badge.plus")
+                }
+                .disabled(viewModel.selectedCount == 0)
+                .accessibilityLabel(Text("Move to Folder"))
+
                 Button(role: .destructive) {
                     viewModel.showDeleteSelectedConfirmation = true
                 } label: {
@@ -575,6 +583,26 @@ private extension View {
                         }
                     )
                     .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                }
+            }
+            .sheet(isPresented: Bindable(viewModel).showMoveToFolderSheet) {
+                MoveToFolderSheet(
+                    folders: viewModel.folderViewModel.folders,
+                    selectedCount: viewModel.selectedCount
+                ) { targetFolderId in
+                    let selectedIds = viewModel.selectedConversationIds
+                    let folderVM = viewModel.folderViewModel
+                    Task {
+                        for id in selectedIds {
+                            if let conversation = viewModel.conversations.first(where: { $0.id == id }) {
+                                if let idx = viewModel.conversations.firstIndex(where: { $0.id == id }) {
+                                    viewModel.conversations[idx].folderId = targetFolderId
+                                }
+                                await folderVM.moveChat(conversation: conversation, to: targetFolderId)
+                            }
+                        }
+                    }
+                    viewModel.exitSelectionMode()
                 }
             }
     }

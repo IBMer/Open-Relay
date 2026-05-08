@@ -51,6 +51,126 @@ final class FolderListViewModel {
     /// Full details of the active folder (loaded on selection, for system prompt / model IDs).
     var activeFolderDetail: ChatFolder?
 
+    // MARK: - Folder Chat Selection Mode
+
+    /// Whether folder-chat multi-select mode is active.
+    var isFolderChatSelectionMode: Bool = false
+
+    /// The folder ID whose chats are being multi-selected (only one folder at a time).
+    var selectionFolderId: String?
+
+    /// IDs of chats currently selected for bulk actions within the active folder.
+    var selectedFolderChatIds: Set<String> = []
+
+    /// Whether the "delete selected folder chats" confirmation is showing.
+    var showDeleteSelectedFolderChatsConfirmation: Bool = false
+
+    /// Whether a bulk folder-chat operation is in progress (shows spinner).
+    var isBulkFolderChatOperating: Bool = false
+
+    /// Number of currently selected folder chats.
+    var selectedFolderChatCount: Int { selectedFolderChatIds.count }
+
+    /// Enters selection mode for a specific folder.
+    func enterFolderChatSelectionMode(folderId: String) {
+        selectionFolderId = folderId
+        isFolderChatSelectionMode = true
+        selectedFolderChatIds = []
+    }
+
+    /// Exits folder chat selection mode and clears all selections.
+    func exitFolderChatSelectionMode() {
+        isFolderChatSelectionMode = false
+        selectionFolderId = nil
+        selectedFolderChatIds = []
+    }
+
+    /// Toggles selection state of a single chat inside the active folder.
+    func toggleFolderChatSelection(_ chatId: String) {
+        if selectedFolderChatIds.contains(chatId) {
+            selectedFolderChatIds.remove(chatId)
+        } else {
+            selectedFolderChatIds.insert(chatId)
+        }
+    }
+
+    /// Returns whether a given chat is selected.
+    func isFolderChatSelected(_ chatId: String) -> Bool {
+        selectedFolderChatIds.contains(chatId)
+    }
+
+    /// Selects all chats in the given folder.
+    func selectAllChats(in folderId: String) {
+        guard let idx = folders.firstIndex(where: { $0.id == folderId }) else { return }
+        let validChats = folders[idx].chats.filter { !$0.title.isEmpty }
+        selectedFolderChatIds = Set(validChats.map(\.id))
+    }
+
+    /// Removes all selected chats from their folder (moves to root) without deleting them.
+    func removeSelectedChatsFromFolder() async {
+        guard let folderId = selectionFolderId, !selectedFolderChatIds.isEmpty else { return }
+        guard let manager else { return }
+
+        isBulkFolderChatOperating = true
+        let idsToRemove = selectedFolderChatIds
+
+        // Optimistic: remove from local folder chat list immediately
+        if let idx = folders.firstIndex(where: { $0.id == folderId }) {
+            folders[idx].chats.removeAll { idsToRemove.contains($0.id) }
+        }
+
+        // Server sync — fire concurrently
+        await withTaskGroup(of: Void.self) { group in
+            for chatId in idsToRemove {
+                group.addTask { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try await manager.moveChat(conversationId: chatId, to: nil)
+                    } catch {
+                        logger.error("Failed to remove chat \(chatId) from folder: \(error.localizedDescription)")
+                    }
+                }
+            }
+        }
+
+        isBulkFolderChatOperating = false
+        exitFolderChatSelectionMode()
+
+        // Notify the main chat list to refresh so the un-foldered chats
+        // appear immediately in the sidebar "Chats" section.
+        NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
+    }
+
+    /// Deletes all selected chats from their folder permanently.
+    /// `deleteConversation` is a closure provided by the caller that handles the actual delete API call
+    /// (so FolderListViewModel doesn't need to know about ConversationManager).
+    func deleteSelectedFolderChats(
+        folderId: String,
+        deleteConversation: @escaping (String) async -> Void
+    ) async {
+        guard !selectedFolderChatIds.isEmpty else { return }
+
+        isBulkFolderChatOperating = true
+        let idsToDelete = selectedFolderChatIds
+
+        // Optimistic: remove from local folder chat list immediately
+        if let idx = folders.firstIndex(where: { $0.id == folderId }) {
+            folders[idx].chats.removeAll { idsToDelete.contains($0.id) }
+        }
+
+        // Server deletes — fire concurrently
+        await withTaskGroup(of: Void.self) { group in
+            for chatId in idsToDelete {
+                group.addTask {
+                    await deleteConversation(chatId)
+                }
+            }
+        }
+
+        isBulkFolderChatOperating = false
+        exitFolderChatSelectionMode()
+    }
+
     // MARK: - Computed: Tree
 
     /// Root-level folders (parentId == nil) with childFolders recursively populated.
@@ -393,6 +513,9 @@ final class FolderListViewModel {
 
         do {
             try await manager.deleteFolder(id: id, deleteContents: deleteContents)
+            // Notify the main chat list to refresh so any un-foldered chats
+            // appear immediately in the sidebar "Chats" section.
+            NotificationCenter.default.post(name: .conversationListNeedsRefresh, object: nil)
         } catch {
             logger.error("Failed to delete folder: \(error.localizedDescription)")
             // Revert the local removal

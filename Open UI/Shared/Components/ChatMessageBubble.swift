@@ -185,22 +185,25 @@ struct TypingIndicator: View {
             ForEach(0..<3, id: \.self) { i in
                 Circle()
                     .fill(theme.textTertiary)
+                    // Fixed frame — never changes size, so layout is perfectly stable.
                     .frame(width: 7, height: 7)
-                    .scaleEffect(animate ? 1.0 : 0.5)
-                    .opacity(animate ? 1.0 : 0.3)
-                    // Bug 15: repeatForever() defaults to autoreverses: false, causing
-                    // a hard snap back to 0.5 at each loop boundary — a visible flicker.
-                    // Adding autoreverses: true produces a smooth breathing wave instead.
+                    // Offset-based bounce: moves the dot up/down without touching the
+                    // layout frame at all. No scaleEffect = no layout re-measurement
+                    // on every animation tick, eliminating the "jumping around" artifact.
+                    .offset(y: animate ? -3 : 0)
+                    .opacity(animate ? 1.0 : 0.4)
                     .animation(
-                        .easeInOut(duration: 0.6)
+                        .easeInOut(duration: 0.5)
                             .repeatForever(autoreverses: true)
-                            .delay(Double(i) * 0.2),
+                            .delay(Double(i) * 0.18),
                         value: animate
                     )
             }
         }
+        // Fixed intrinsic size so the indicator occupies the same space as a
+        // single line of text — prevents layout recalculation on appear/disappear.
+        .frame(height: 22, alignment: .center)
         .padding(.horizontal, Spacing.sm)
-        .padding(.vertical, Spacing.sm)
         .onAppear { animate = true }
         // Bug 8: explicitly stop the three repeatForever CAAnimations when TypingIndicator
         // leaves the hierarchy (first token arrives). Without this, the CAAnimation objects

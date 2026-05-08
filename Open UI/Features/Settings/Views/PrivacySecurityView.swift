@@ -5,7 +5,6 @@ import SwiftUI
 struct PrivacySecurityView: View {
     @Environment(\.theme) private var theme
     @Environment(AppDependencyContainer.self) private var dependencies
-    @State private var clearDataConfirmation = false
     @State private var isExporting = false
     @State private var exportURL: URL?
     @State private var showExportSheet = false
@@ -30,17 +29,10 @@ struct PrivacySecurityView: View {
                         icon: "arrow.down.circle",
                         title: "Export Data",
                         subtitle: isExporting ? "Exporting..." : "Download your conversations as JSON",
-                        showDivider: true,
+                        showDivider: false,
                         accessory: isExporting ? .loading : .chevron
                     ) {
                         Task { await exportData() }
-                    }
-
-                    DestructiveSettingsCell(
-                        icon: "trash",
-                        title: "Clear Local Cache"
-                    ) {
-                        clearDataConfirmation = true
                     }
                 }
             }
@@ -49,18 +41,6 @@ struct PrivacySecurityView: View {
         .background(theme.background)
         .navigationTitle("Privacy & Security")
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog(
-            "Clear Local Cache",
-            isPresented: $clearDataConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button("Clear Cache", role: .destructive) {
-                clearCache()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This will clear cached images and temporary data. Your account and conversations are stored on the server and will not be affected.")
-        }
         .sheet(isPresented: $showExportSheet, onDismiss: {
             // FIX: Clean up the temp export file after sharing to prevent data leaks.
             if let url = exportURL {
@@ -219,15 +199,6 @@ struct PrivacySecurityView: View {
         } catch {
             exportError = error.localizedDescription
         }
-    }
-
-    private func clearCache() {
-        // Clear URL cache
-        URLCache.shared.removeAllCachedResponses()
-        // Clear temporary files
-        let tmp = FileManager.default.temporaryDirectory
-        try? FileManager.default.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil)
-            .forEach { try? FileManager.default.removeItem(at: $0) }
     }
 }
 

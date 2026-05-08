@@ -2532,6 +2532,9 @@ final class APIClient: @unchecked Sendable {
             }
             return array.compactMap { item -> TerminalServer? in
                 guard let id = item["id"] as? String else { return nil }
+                // Skip servers the admin has explicitly disabled (enabled == false).
+                // Absent/nil means enabled by default.
+                if let enabled = item["enabled"] as? Bool, !enabled { return nil }
                 let name = item["name"] as? String ?? id
                 return TerminalServer(id: id, name: name)
             }
@@ -2624,7 +2627,7 @@ final class APIClient: @unchecked Sendable {
         let (data, _) = try await network.requestRaw(
             path: "/api/v1/terminals/\(serverId)/execute",
             method: .post,
-            queryItems: [URLQueryItem(name: "wait", value: "10")],
+            queryItems: [URLQueryItem(name: "wait", value: "5")],
             body: bodyData
         )
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -2648,6 +2651,26 @@ final class APIClient: @unchecked Sendable {
                 userInfo: [NSLocalizedDescriptionKey: "Invalid status response"]))
         }
         return TerminalCommandResult(from: json)
+    }
+
+    /// Sends text to the stdin of a running process.
+    ///
+    /// Used to provide interactive input (passwords, prompts, etc.) to a
+    /// long-running process without spawning a new shell command.
+    func terminalSendInput(serverId: String, processId: String, input: String) async throws {
+        let body = try JSONSerialization.data(withJSONObject: ["input": input])
+        let (_, response) = try await network.session.data(for: network.buildRequest(
+            path: "/api/v1/terminals/\(serverId)/execute/\(processId)/input",
+            method: .post,
+            body: body,
+            contentType: "application/json",
+            authenticated: true,
+            timeout: 30
+        ))
+        if let httpResponse = response as? HTTPURLResponse,
+           !(200..<400).contains(httpResponse.statusCode) {
+            throw APIError.httpError(statusCode: httpResponse.statusCode, message: "Send input failed", data: nil)
+        }
     }
 
     func terminalUploadFile(serverId: String, fileData: Data, fileName: String, destinationPath: String) async throws {

@@ -61,6 +61,9 @@ final class ChatListViewModel {
     /// Whether the "archive all" confirmation is showing.
     var showArchiveAllConfirmation: Bool = false
 
+    /// Whether the "move to folder" sheet is showing (bulk selection).
+    var showMoveToFolderSheet: Bool = false
+
     // MARK: - Folder Integration
 
     /// The folder view model — drives the Folders section.

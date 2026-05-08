@@ -1540,9 +1540,21 @@ final class ChatViewModel {
         guard let manager else { return }
         do {
             availableTerminalServers = try await manager.fetchTerminalServers()
-            // Auto-select first terminal if only one available
+            // Auto-select first terminal if only one is available and nothing is selected yet.
             if selectedTerminalServer == nil, let first = availableTerminalServers.first {
                 selectedTerminalServer = first
+            }
+            // If the previously selected server was removed or disabled server-side,
+            // clear the selection so the user isn't silently routed to a dead server.
+            if let current = selectedTerminalServer,
+               !availableTerminalServers.contains(current) {
+                selectedTerminalServer = availableTerminalServers.first
+                // If terminal was enabled and we had to change/clear the server, disable
+                // terminal so the user makes an explicit choice rather than silently
+                // switching servers mid-session.
+                if terminalEnabled && selectedTerminalServer == nil {
+                    terminalEnabled = false
+                }
             }
         } catch {
             logger.debug("Terminal servers fetch failed: \(error.localizedDescription)")
@@ -1555,6 +1567,12 @@ final class ChatViewModel {
     func toggleTerminal() {
         if terminalEnabled {
             terminalEnabled = false
+            // Clear the selected server so a fresh selection is required if
+            // re-enabled with multiple servers — prevents silently routing to
+            // a stale server the user may no longer intend to use.
+            if availableTerminalServers.count > 1 {
+                selectedTerminalServer = nil
+            }
         } else {
             if selectedTerminalServer == nil, let first = availableTerminalServers.first {
                 selectedTerminalServer = first
