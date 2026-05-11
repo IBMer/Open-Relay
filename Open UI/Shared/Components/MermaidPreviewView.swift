@@ -21,9 +21,14 @@ import BeautifulMermaid
 ///   vs. a WebView (~10-30MB)
 struct MermaidPreviewView: View {
     let code: String
+    /// When `true`, the closing ``` fence has not yet arrived. The header shows a
+    /// spinner instead of the Diagram/Source toggle, and rendering is deferred until
+    /// streaming ends (mirrors `HTMLPreviewView` / `SVGPreviewView`).
+    var isStreaming: Bool = false
 
-    init(code: String) {
+    init(code: String, isStreaming: Bool = false) {
         self.code = code
+        self.isStreaming = isStreaming
     }
 
     @SwiftUI.State private var renderedImage: UIImage?
@@ -61,7 +66,8 @@ struct MermaidPreviewView: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(.quaternary)
         )
-        .task(id: "\(code)\(colorScheme)") {
+        .task(id: "\(code)\(colorScheme)\(isStreaming)") {
+            guard !isStreaming else { return }
             await renderDiagram()
         }
     }
@@ -82,22 +88,29 @@ struct MermaidPreviewView: View {
 
             Spacer()
 
-            // Diagram/Source toggle
-            Button {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    showSource.toggle()
+            // Streaming spinner — replaces toggle while the block is open
+            if isStreaming {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(.secondary)
+            } else {
+                // Diagram/Source toggle (only available after stream completes)
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showSource.toggle()
+                    }
+                    Haptics.play(.light)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: showSource ? "point.3.connected.trianglepath.dotted" : "chevron.left.forwardslash.chevron.right")
+                            .scaledFont(size: 11, weight: .medium)
+                        Text(showSource ? "Diagram" : "Source")
+                            .scaledFont(size: 12, weight: .medium)
+                    }
+                    .foregroundStyle(.secondary)
                 }
-                Haptics.play(.light)
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: showSource ? "point.3.connected.trianglepath.dotted" : "chevron.left.forwardslash.chevron.right")
-                        .scaledFont(size: 11, weight: .medium)
-                    Text(showSource ? "Diagram" : "Source")
-                        .scaledFont(size: 12, weight: .medium)
-                }
-                .foregroundStyle(.secondary)
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
 
             // Copy button
             Button {
@@ -124,8 +137,8 @@ struct MermaidPreviewView: View {
             }
             .buttonStyle(.plain)
 
-            // Fullscreen button (only when image is available)
-            if renderedImage != nil {
+            // Fullscreen button (only when image is available and not streaming)
+            if !isStreaming, renderedImage != nil {
                 Button {
                     showFullscreen = true
                     Haptics.play(.light)

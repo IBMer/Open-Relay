@@ -105,10 +105,6 @@ struct UpdateAvailableSheet: View {
 
     private var releaseNotesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("What's New")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(theme.textPrimary)
-
             // Use MarkdownView for proper rendering of headings + bullet lists
             MarkdownView(update.releaseNotes, theme: releaseNotesTheme)
                 .frame(maxWidth: .infinity, alignment: .leading)

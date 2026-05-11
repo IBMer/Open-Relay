@@ -64,6 +64,13 @@ final class TerminalBrowserViewModel {
     /// The next offset to use when polling for shell output.
     private var shellOutputOffset: Int = 0
 
+    // MARK: - Command History
+
+    /// Ordered list of previously entered commands (most recent last).
+    var commandHistory: [String] = []
+    /// Current position while navigating history (-1 = not navigating).
+    var historyIndex: Int = -1
+
     // MARK: - Computed
 
     /// Path segments for breadcrumb navigation.
@@ -90,6 +97,8 @@ final class TerminalBrowserViewModel {
     func configure(apiClient: APIClient, serverId: String) {
         self.apiClient = apiClient
         self.serverId = serverId
+        // Eagerly warm the shell so it's ready before the user opens the terminal panel.
+        Task { await startShell() }
     }
 
     /// Resets all state to defaults. Called when switching to a new chat
@@ -113,6 +122,8 @@ final class TerminalBrowserViewModel {
         newFolderName = ""
         renamingFile = nil
         renameText = ""
+        commandHistory = []
+        historyIndex = -1
     }
 
     // MARK: - Navigation
@@ -276,12 +287,18 @@ final class TerminalBrowserViewModel {
             return
         }
 
-        // Echo input locally so the user sees what they typed
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Append to history (skip empty commands and duplicates of the last entry)
+        if !trimmed.isEmpty, commandHistory.last != trimmed {
+            commandHistory.append(trimmed)
+        }
+        historyIndex = -1
+
         commandInput = ""
-        appendOutput("\r\n$ \(text)")
 
         // Handle "clear" locally for instant feedback
-        if text.trimmingCharacters(in: .whitespacesAndNewlines) == "clear" {
+        if trimmed == "clear" {
             shellOutput = ""
             outputScrollToken += 1
         }
@@ -298,6 +315,44 @@ final class TerminalBrowserViewModel {
                 logger.error("sendInput error: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Sends a raw byte sequence (e.g. Ctrl+C = `\x03`, Tab = `\t`) to the shell.
+    func sendRawInput(_ bytes: String) {
+        guard let apiClient, !serverId.isEmpty, let processId = shellProcessId else { return }
+        Task {
+            do {
+                try await apiClient.terminalSendInput(
+                    serverId: serverId,
+                    processId: processId,
+                    input: bytes
+                )
+            } catch {
+                logger.error("sendRawInput error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Navigates command history. `up: true` = older command, `up: false` = newer.
+    func navigateHistory(up: Bool) {
+        guard !commandHistory.isEmpty else { return }
+        if up {
+            if historyIndex == -1 {
+                historyIndex = commandHistory.count - 1
+            } else if historyIndex > 0 {
+                historyIndex -= 1
+            }
+        } else {
+            if historyIndex == -1 { return }
+            if historyIndex < commandHistory.count - 1 {
+                historyIndex += 1
+            } else {
+                historyIndex = -1
+                commandInput = ""
+                return
+            }
+        }
+        commandInput = commandHistory[historyIndex]
     }
 
     /// Clears the on-screen terminal output buffer.
@@ -365,14 +420,40 @@ final class TerminalBrowserViewModel {
 
     /// Appends text to the output buffer and bumps the scroll token.
     ///
-    /// Filters out known harmless bash warnings that appear when bash runs
-    /// without a PTY (pseudo-terminal). These are not real errors — they are
-    /// standard output from bash in containerised/non-interactive environments.
+    /// Strips ANSI escape sequences and known harmless bash non-PTY warnings
+    /// before appending — the plain SwiftUI Text view cannot render them.
     private func appendOutput(_ text: String) {
-        let filtered = filterBashWarnings(text)
+        let stripped = stripAnsiCodes(text)
+        let filtered = filterBashWarnings(stripped)
         guard !filtered.isEmpty else { return }
         shellOutput += filtered
         outputScrollToken += 1
+    }
+
+    /// Removes ANSI/VT100 escape sequences from `text`.
+    ///
+    /// Covers:
+    /// - CSI sequences: `ESC [ … <final-byte>` (colours, cursor, erase, …)
+    /// - OSC sequences: `ESC ] … ST` (title setting, hyperlinks, …)
+    /// - Single-char C1 controls: `ESC <char>` (e.g. ESC M, ESC =)
+    private func stripAnsiCodes(_ text: String) -> String {
+        // CSI: ESC [ followed by parameter/intermediate bytes, ending in a letter
+        let csi = "\u{1B}\\[[0-9;?]*[A-Za-z]"
+        // OSC: ESC ] … terminated by BEL (0x07) or ST (ESC \)
+        let osc = "\u{1B}].*?(\u{07}|\u{1B}\\\\)"
+        // Single ESC + one non-[ character (e.g. ESC M, ESC =, ESC >)
+        let singleEsc = "\u{1B}[^\\[]"
+        // Bare ESC at end of string or before next ESC
+        let bareEsc = "\u{1B}"
+
+        var result = text
+        for pattern in [csi, osc, singleEsc, bareEsc] {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+                let range = NSRange(result.startIndex..., in: result)
+                result = regex.stringByReplacingMatches(in: result, range: range, withTemplate: "")
+            }
+        }
+        return result
     }
 
     /// Strips lines that are known harmless bash non-PTY startup warnings.

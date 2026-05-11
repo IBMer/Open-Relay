@@ -1567,12 +1567,11 @@ final class ChatViewModel {
     func toggleTerminal() {
         if terminalEnabled {
             terminalEnabled = false
-            // Clear the selected server so a fresh selection is required if
-            // re-enabled with multiple servers — prevents silently routing to
-            // a stale server the user may no longer intend to use.
-            if availableTerminalServers.count > 1 {
-                selectedTerminalServer = nil
-            }
+            // Always clear the selected server when disabling so terminal_id
+            // is never leaked into subsequent chat completion payloads.
+            // Re-selection happens automatically in loadTerminalServers() /
+            // the else-branch below when the user re-enables.
+            selectedTerminalServer = nil
         } else {
             if selectedTerminalServer == nil, let first = availableTerminalServers.first {
                 selectedTerminalServer = first

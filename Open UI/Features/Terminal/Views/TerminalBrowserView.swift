@@ -19,6 +19,7 @@ struct TerminalBrowserView: View {
     @State private var shareFileURL: URL?
     @State private var confirmDeleteItem: TerminalFileItem?
     @FocusState private var isCommandFocused: Bool
+    @State private var showFullscreenTerminal = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -107,6 +108,9 @@ struct TerminalBrowserView: View {
         .quickLookPreview($previewFileURL)
         .sheet(item: $shareFileURL) { url in
             ShareSheetView(activityItems: [url])
+        }
+        .fullScreenCover(isPresented: $showFullscreenTerminal) {
+            TerminalFullscreenView(viewModel: viewModel)
         }
     }
 
@@ -450,46 +454,38 @@ struct TerminalBrowserView: View {
         .buttonStyle(.plain)
     }
 
-    // MARK: - Terminal Section
+    // MARK: - Terminal Section (mini, inside the panel)
 
     private var terminalSection: some View {
+        TerminalContentView(
+            viewModel: viewModel,
+            isFullscreen: false,
+            onExpand: { showFullscreenTerminal = true }
+        )
+    }
+}
+
+// MARK: - Shared Terminal Content View
+
+/// The reusable terminal output + shortcut bar + input row.
+/// Used both in the mini panel and the fullscreen cover.
+struct TerminalContentView: View {
+    @Bindable var viewModel: TerminalBrowserViewModel
+    var isFullscreen: Bool
+    var onExpand: (() -> Void)? = nil
+
+    @Environment(\.theme) private var theme
+
+    var body: some View {
         VStack(spacing: 0) {
-            // Toolbar: clear button
-            HStack {
-                Spacer()
-                Button {
-                    viewModel.clearOutput()
-                    Haptics.play(.light)
-                } label: {
-                    Label("Clear", systemImage: "trash")
-                        .scaledFont(size: 11, weight: .medium)
-                        .foregroundStyle(theme.textTertiary)
-                }
-                .buttonStyle(.plain)
-                .padding(.trailing, 12)
-                .padding(.vertical, 4)
+            // Toolbar row
+            terminalToolbar
 
-                if !viewModel.isShellReady && !viewModel.isShellStarting {
-                    Button {
-                        Task { await viewModel.startShell() }
-                        Haptics.play(.light)
-                    } label: {
-                        Label("Restart", systemImage: "arrow.clockwise")
-                            .scaledFont(size: 11, weight: .medium)
-                            .foregroundStyle(theme.brandPrimary)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.trailing, 12)
-                    .padding(.vertical, 4)
-                }
-            }
-            .background(Color.black.opacity(0.15))
-
-            // Shell output — single continuous buffer
+            // Shell output
             ScrollViewReader { proxy in
                 ScrollView {
                     Text(viewModel.shellOutput.isEmpty ? " " : viewModel.shellOutput)
-                        .scaledFont(size: 11, design: .monospaced)
+                        .scaledFont(size: 12, design: .monospaced)
                         .foregroundStyle(Color.green.opacity(0.9))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
@@ -497,33 +493,188 @@ struct TerminalBrowserView: View {
                         .padding(.vertical, 8)
                         .id("output")
                 }
-                .frame(minHeight: 200, maxHeight: 350)
+                .frame(
+                    minHeight: isFullscreen ? 0 : 200,
+                    maxHeight: isFullscreen ? .infinity : 350
+                )
                 .background(Color.black.opacity(0.85))
                 .onChange(of: viewModel.outputScrollToken) { _, _ in
                     proxy.scrollTo("output", anchor: .bottom)
                 }
             }
 
-            // Input row — stdin sent to the running bash process
-            HStack(spacing: 8) {
-                Text(viewModel.isShellReady ? "$" : "…")
-                    .scaledFont(size: 14, design: .monospaced)
-                    .foregroundStyle(viewModel.isShellReady ? .green : .yellow)
+            // Quick-action shortcut buttons
+            shortcutBar
 
-                TerminalTextField(
-                    text: $viewModel.commandInput,
-                    textColor: UIColor(theme.textPrimary),
-                    onReturn: {
-                        let input = viewModel.commandInput
-                        viewModel.sendInput(input)
-                    }
-                )
-                .frame(height: 28)
-                .disabled(!viewModel.isShellReady)
+            // Input row
+            inputRow
+        }
+    }
+
+    // MARK: Toolbar
+
+    private var terminalToolbar: some View {
+        HStack(spacing: 0) {
+            Spacer()
+
+            // Restart button (only when shell is dead)
+            if !viewModel.isShellReady && !viewModel.isShellStarting {
+                Button {
+                    Task { await viewModel.startShell() }
+                    Haptics.play(.light)
+                } label: {
+                    Label("Restart", systemImage: "arrow.clockwise")
+                        .scaledFont(size: 11, weight: .medium)
+                        .foregroundStyle(theme.brandPrimary)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 12)
+                .padding(.vertical, 4)
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            .background(Color.black.opacity(0.2))
+
+            // Clear button
+            Button {
+                viewModel.clearOutput()
+                Haptics.play(.light)
+            } label: {
+                Label("Clear", systemImage: "trash")
+                    .scaledFont(size: 11, weight: .medium)
+                    .foregroundStyle(theme.textTertiary)
+            }
+            .buttonStyle(.plain)
+            .padding(.trailing, 12)
+            .padding(.vertical, 4)
+
+            // Expand / collapse button
+            if let onExpand, !isFullscreen {
+                Button {
+                    onExpand()
+                    Haptics.play(.light)
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                        .scaledFont(size: 13, weight: .medium)
+                        .foregroundStyle(theme.textSecondary)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 12)
+                .padding(.vertical, 4)
+                .accessibilityLabel("Expand terminal")
+            }
+        }
+        .background(Color.black.opacity(0.15))
+    }
+
+    // MARK: Shortcut Bar
+
+    private var shortcutBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                shortcutButton("⇥ Tab") {
+                    let current = viewModel.commandInput
+                    viewModel.commandInput = ""
+                    viewModel.sendRawInput(current + "\t")
+                }
+                shortcutButton("↑") {
+                    viewModel.navigateHistory(up: true)
+                }
+                shortcutButton("↓") {
+                    viewModel.navigateHistory(up: false)
+                }
+                shortcutButton("⌃L Clear") {
+                    viewModel.clearOutput()
+                    viewModel.sendRawInput("\u{0C}") // FF / Ctrl+L
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+        }
+        .background(Color.black.opacity(0.6))
+    }
+
+    private func shortcutButton(_ label: String, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            Haptics.play(.light)
+        } label: {
+            Text(label)
+                .scaledFont(size: 12, weight: .semibold, design: .monospaced)
+                .foregroundStyle(.white.opacity(0.85))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.white.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!viewModel.isShellReady)
+    }
+
+    // MARK: Input Row
+
+    private var inputRow: some View {
+        HStack(spacing: 8) {
+            Text(viewModel.isShellReady ? "$" : "…")
+                .scaledFont(size: 14, design: .monospaced)
+                .foregroundStyle(viewModel.isShellReady ? .green : .yellow)
+
+            TerminalTextField(
+                text: $viewModel.commandInput,
+                textColor: UIColor.white,
+                onReturn: {
+                    let input = viewModel.commandInput
+                    viewModel.sendInput(input)
+                }
+            )
+            .frame(height: 28)
+            .disabled(!viewModel.isShellReady)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.2))
+    }
+}
+
+// MARK: - Fullscreen Terminal View
+
+/// Full-screen terminal presented via `.fullScreenCover`.
+struct TerminalFullscreenView: View {
+    @Bindable var viewModel: TerminalBrowserViewModel
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.theme) private var theme
+
+    var body: some View {
+        NavigationStack {
+            TerminalContentView(viewModel: viewModel, isFullscreen: true)
+                .background(Color.black)
+                .navigationTitle("Terminal")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            dismiss()
+                        } label: {
+                            Image(systemName: "arrow.down.right.and.arrow.up.left")
+                                .scaledFont(size: 14, weight: .semibold)
+                                .foregroundStyle(theme.brandPrimary)
+                        }
+                        .accessibilityLabel("Collapse terminal")
+                    }
+
+                    ToolbarItem(placement: .topBarTrailing) {
+                        HStack(spacing: 4) {
+                            if viewModel.isShellStarting {
+                                ProgressView().controlSize(.mini)
+                            } else if viewModel.isShellReady {
+                                Circle()
+                                    .fill(.green)
+                                    .frame(width: 7, height: 7)
+                            } else {
+                                Circle()
+                                    .fill(.orange)
+                                    .frame(width: 7, height: 7)
+                            }
+                        }
+                    }
+                }
         }
     }
 }
@@ -682,7 +833,7 @@ private struct TerminalDocumentPicker: UIViewControllerRepresentable {
 /// `textFieldShouldReturn` and return `false` — this executes the command
 /// **without** dismissing the keyboard, which SwiftUI's `TextField.onSubmit`
 /// cannot do.
-private struct TerminalTextField: UIViewRepresentable {
+struct TerminalTextField: UIViewRepresentable {
     @Binding var text: String
     var textColor: UIColor
     var onReturn: () -> Void
@@ -700,6 +851,7 @@ private struct TerminalTextField: UIViewRepresentable {
         field.autocorrectionType = .no
         field.spellCheckingType = .no
         field.returnKeyType = .default
+        field.keyboardAppearance = .dark
         field.delegate = context.coordinator
         field.addTarget(context.coordinator, action: #selector(Coordinator.textChanged(_:)), for: .editingChanged)
         return field
@@ -737,4 +889,3 @@ private struct TerminalTextField: UIViewRepresentable {
         }
     }
 }
-

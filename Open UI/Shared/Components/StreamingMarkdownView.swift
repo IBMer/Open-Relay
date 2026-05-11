@@ -277,9 +277,14 @@ struct StreamingMarkdownView: View {
             let partialContent = String(afterOpen)
             if segmentCache.fenceIsLivePreview {
                 let tag = segmentCache.fenceMakeSegTag
-                let makeSeg: (String) -> ContentSegment = tag == "html"
-                    ? { .html($0, isStreaming: true) }
-                    : { .svg($0, isStreaming: true) }
+                let makeSeg: (String) -> ContentSegment = { content in
+                    switch tag {
+                    case "html":    return .html(content, isStreaming: true)
+                    case "svg":     return .svg(content, isStreaming: true)
+                    case "mermaid": return .mermaid(content, isStreaming: true)
+                    default:        return .chart(content, isStreaming: true)
+                    }
+                }
                 let before = segmentCache.fenceBeforeText
                 var result: [ContentSegment] = []
                 if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -304,10 +309,18 @@ struct StreamingMarkdownView: View {
         // ── SLOW PATH: first call or content replaced — locate fence via full scan ──
         // Runs at most once per code block (until closing fence arrives).
 
-        // ── Phase 1: Live-preview languages (html/svg) ─────────────────────
+        // ── Phase 1: Live-preview languages (html/svg/mermaid/chart) ───────
         let livePreviewCandidates: [(tag: String, langKey: String)] = [
-            ("```html\n", "html"),
-            ("```svg\n",  "svg"),
+            ("```html\n",      "html"),
+            ("```svg\n",       "svg"),
+            ("```mermaid\n",   "mermaid"),
+            ("```chart\n",     "chart"),
+            ("```chartjs\n",   "chart"),
+            ("```echarts\n",   "chart"),
+            ("```highcharts\n","chart"),
+            ("```plotly\n",    "chart"),
+            ("```vega-lite\n", "chart"),
+            ("```vegalite\n",  "chart"),
         ]
         for (tag, langKey) in livePreviewCandidates {
             guard let openRange = text.range(of: tag, options: .caseInsensitive) else { continue }
@@ -326,9 +339,14 @@ struct StreamingMarkdownView: View {
             segmentCache.fenceLanguage = langKey
             segmentCache.fenceBeforeText = before
 
-            let makeSeg: (String) -> ContentSegment = langKey == "html"
-                ? { .html($0, isStreaming: true) }
-                : { .svg($0, isStreaming: true) }
+            let makeSeg: (String) -> ContentSegment = { content in
+                switch langKey {
+                case "html":    return .html(content, isStreaming: true)
+                case "svg":     return .svg(content, isStreaming: true)
+                case "mermaid": return .mermaid(content, isStreaming: true)
+                default:        return .chart(content, isStreaming: true)
+                }
+            }
             var result: [ContentSegment] = []
             if !before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.append(.markdown(before))
@@ -436,16 +454,17 @@ struct StreamingMarkdownView: View {
                 MarkdownView(text, theme: cachedTheme)
                     .codeAutoScroll(true)
             }
-        case .chart(let code):
-            if let spec = tryParseChart(code: code) {
-                ChartPreviewView(spec: spec, rawCode: code, language: "json")
-            } else {
-                MarkdownView("```json\n\(code)\n```", theme: cachedTheme)
-            }
+        case .chart(let code, let streaming):
+            ChartPreviewView(
+                spec: tryParseChart(code: code),
+                rawCode: code,
+                language: "json",
+                isStreaming: streaming
+            )
         case .html(let code, let streaming):
             HTMLPreviewView(html: code, isStreaming: streaming)
-        case .mermaid(let code):
-            MermaidPreviewView(code: code)
+        case .mermaid(let code, let streaming):
+            MermaidPreviewView(code: code, isStreaming: streaming)
         case .svg(let code, let streaming):
             SVGPreviewView(code: code, isStreaming: streaming)
         case .python(let code):
@@ -492,10 +511,12 @@ struct StreamingMarkdownView: View {
 
     private enum ContentSegment {
         case markdown(String)
-        case chart(String)
+        /// `isStreaming` — true while the closing ``` fence has not yet arrived.
+        case chart(String, isStreaming: Bool)
         /// `isStreaming` — true while the closing ``` fence has not yet arrived.
         case html(String, isStreaming: Bool)
-        case mermaid(String)
+        /// `isStreaming` — true while the closing ``` fence has not yet arrived.
+        case mermaid(String, isStreaming: Bool)
         /// `isStreaming` — true while the closing ``` fence has not yet arrived.
         case svg(String, isStreaming: Bool)
         case python(String)
@@ -784,9 +805,9 @@ struct StreamingMarkdownView: View {
             let isPython = pythonLanguageTags.contains(lang) && codeContent.trimmingCharacters(in: .whitespacesAndNewlines).count >= 2
 
             if isChart {
-                segments.append(.chart(codeContent))
+                segments.append(.chart(codeContent, isStreaming: false))
             } else if isMermaid {
-                segments.append(.mermaid(codeContent))
+                segments.append(.mermaid(codeContent, isStreaming: false))
             } else if isSVG {
                 segments.append(.svg(codeContent, isStreaming: false))
             } else if isPython {

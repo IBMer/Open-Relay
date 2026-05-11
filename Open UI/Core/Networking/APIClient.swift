@@ -3504,7 +3504,11 @@ final class APIClient: @unchecked Sendable {
         let pinned = json["pinned"] as? Bool ?? false
         let archived = json["archived"] as? Bool ?? false
         let folderId = json["folder_id"] as? String
-        let tags = json["tags"] as? [String] ?? []
+        let tags: [String] = {
+            if let t = json["tags"] as? [String], !t.isEmpty { return t }
+            if let meta = json["meta"] as? [String: Any], let t = meta["tags"] as? [String] { return t }
+            return []
+        }()
 
         var model: String?
         if let chat = json["chat"] as? [String: Any],
@@ -3535,13 +3539,19 @@ final class APIClient: @unchecked Sendable {
         var createdAt = Date()
         var updatedAt = Date()
         if let ts = json["created_at"] as? Double { createdAt = Date(timeIntervalSince1970: ts) }
+        else if let ts = json["created_at"] as? Int { createdAt = Date(timeIntervalSince1970: Double(ts)) }
         if let ts = json["updated_at"] as? Double { updatedAt = Date(timeIntervalSince1970: ts) }
+        else if let ts = json["updated_at"] as? Int { updatedAt = Date(timeIntervalSince1970: Double(ts)) }
 
         let pinned = json["pinned"] as? Bool ?? false
         let archived = json["archived"] as? Bool ?? false
         let folderId = json["folder_id"] as? String
         let shareId = json["share_id"] as? String
-        let tags = json["tags"] as? [String] ?? []
+        let tags: [String] = {
+            if let t = json["tags"] as? [String], !t.isEmpty { return t }
+            if let meta = json["meta"] as? [String: Any], let t = meta["tags"] as? [String] { return t }
+            return []
+        }()
 
         var model: String?
         var systemPrompt: String?
@@ -3882,7 +3892,13 @@ final class APIClient: @unchecked Sendable {
               let role = MessageRole(rawValue: roleStr)
         else { return nil }
 
-        let content = msg["content"] as? String ?? ""
+        var content = msg["content"] as? String ?? ""
+        if content.isEmpty,
+           let outputArr = msg["output"] as? [[String: Any]],
+           let firstOutput = outputArr.first,
+           let contentArr = firstOutput["content"] as? [[String: Any]] {
+            content = contentArr.compactMap { $0["text"] as? String }.joined()
+        }
 
         var timestamp = Date()
         if let ts = msg["timestamp"] as? Double {

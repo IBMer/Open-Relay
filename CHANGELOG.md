@@ -1,5 +1,24 @@
 # Changelog
 
+## v4.2 — May 10, 2026
+
+### What's New
+- Terminal now has a fullscreen mode — tap the expand button in the terminal toolbar to open a full-screen terminal view with more room to work.
+- Terminal now shows a quick-action shortcut bar with Tab, history up/down (↑ ↓), and Clear buttons for faster keyboard-free input.
+
+### Improvements
+- Terminal shell now starts warming up as soon as you enable terminal access, so input is ready instantly when you open the panel.
+
+### Bug Fixes
+- Fixed terminal output displaying raw ANSI escape codes (e.g. `[1m[96m…[0m`) instead of clean text.
+- Fixed terminal access (terminal_id) still being included in chat requests even after disabling the terminal toggle.
+- Fixed server update changelog showing raw HTML code blocks or being invisible — now renders as native SwiftUI views with bold titles and color-coded category labels.
+- Server update sheet now shows the server's favicon as the icon (with a server.rack fallback if unavailable).
+- Fixed conversation tags not appearing — tags were being read from the wrong field in the server response; now correctly reads from the updated server format.
+- Fixed conversation timestamps (created/updated dates) showing the wrong time after loading a chat — the server sends them as integers which weren't being handled correctly.
+
+## Previous Builds
+
 ## v4.1 — May 8, 2026
 
 ### What's New

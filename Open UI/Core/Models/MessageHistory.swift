@@ -387,7 +387,13 @@ struct MessageHistory: Sendable {
     static func parseNode(id: String, from msg: [String: Any]) -> HistoryNode {
         let roleStr = msg["role"] as? String ?? "user"
         let role = MessageRole(rawValue: roleStr) ?? .user
-        let content = msg["content"] as? String ?? ""
+        var content = msg["content"] as? String ?? ""
+        if content.isEmpty,
+           let outputArr = msg["output"] as? [[String: Any]],
+           let firstOutput = outputArr.first,
+           let contentArr = firstOutput["content"] as? [[String: Any]] {
+            content = contentArr.compactMap { $0["text"] as? String }.joined()
+        }
 
         var timestamp = Date()
         if let ts = msg["timestamp"] as? Double {

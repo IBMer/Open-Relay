@@ -620,9 +620,13 @@ struct ChartAnyDecodable: Decodable {
 ///
 /// Matches the style of `HTMLPreviewView` for visual consistency.
 struct ChartPreviewView: View {
-    let spec: USpec
+    /// The parsed chart spec. `nil` while the code fence is still open (streaming).
+    let spec: USpec?
     let rawCode: String
     let language: String
+    /// When `true`, the closing ``` fence has not yet arrived. The header shows a
+    /// spinner instead of the Chart/Source toggle (mirrors `HTMLPreviewView`).
+    var isStreaming: Bool = false
 
     @State private var showSource = false
     @State private var codeCopied = false
@@ -633,11 +637,11 @@ struct ChartPreviewView: View {
         VStack(spacing: 0) {
             // ── Header bar ──
             HStack(spacing: 12) {
-                // Chart type label
+                // Chart type label / icon
                 HStack(spacing: 4) {
-                    Image(systemName: chartIcon)
+                    Image(systemName: spec.map { chartIcon(for: $0.kind) } ?? "chart.bar")
                         .scaledFont(size: 10, weight: .semibold)
-                    Text(spec.kind.rawValue)
+                    Text(spec?.kind.rawValue ?? "chart")
                         .font(.system(.caption, design: .monospaced))
                         .fontWeight(.semibold)
                 }
@@ -645,22 +649,29 @@ struct ChartPreviewView: View {
 
                 Spacer()
 
-                // Chart/Source toggle
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        showSource.toggle()
+                // Streaming spinner — replaces toggle while the block is open
+                if isStreaming {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .tint(.secondary)
+                } else {
+                    // Chart/Source toggle (only available after stream completes)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            showSource.toggle()
+                        }
+                        Haptics.play(.light)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: showSource ? "chart.bar" : "chevron.left.forwardslash.chevron.right")
+                                .scaledFont(size: 11, weight: .medium)
+                            Text(showSource ? "Chart" : "Source")
+                                .scaledFont(size: 12, weight: .medium)
+                        }
+                        .foregroundStyle(.secondary)
                     }
-                    Haptics.play(.light)
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: showSource ? "chart.bar" : "chevron.left.forwardslash.chevron.right")
-                            .scaledFont(size: 11, weight: .medium)
-                        Text(showSource ? "Chart" : "Source")
-                            .scaledFont(size: 12, weight: .medium)
-                    }
-                    .foregroundStyle(.secondary)
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
 
                 // Copy button
                 Button {
@@ -699,10 +710,23 @@ struct ChartPreviewView: View {
                     // Syntax-highlighted JSON source (headerless — parent has the toolbar)
                     HighlightedSourceView(code: rawCode, language: language)
                         .transition(.opacity)
-                } else {
+                } else if let resolvedSpec = spec {
                     // Rendered chart
-                    USpecChartView(spec: spec)
+                    USpecChartView(spec: resolvedSpec)
                         .transition(.opacity)
+                } else {
+                    // Streaming — spec not yet parseable; show loading placeholder
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(.secondary)
+                        Text("Building chart…")
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 260)
+                    .transition(.opacity)
                 }
             }
             .animation(.easeInOut(duration: 0.2), value: showSource)
@@ -716,8 +740,8 @@ struct ChartPreviewView: View {
     }
 
     /// Returns an SF Symbol name for the chart type.
-    private var chartIcon: String {
-        switch spec.kind {
+    private func chartIcon(for kind: ChartKind) -> String {
+        switch kind {
         case .line: return "chart.xyaxis.line"
         case .bar: return "chart.bar"
         case .area: return "chart.line.uptrend.xyaxis"

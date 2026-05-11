@@ -48,7 +48,7 @@ struct CombinedUpdateSheet: View {
                             .padding(.horizontal, 20)
 
                         if !app.releaseNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            releaseNotesSection(app.releaseNotes, title: "What's New")
+                            appReleaseNotesSection(app.releaseNotes)
                                 .padding(.top, 20)
                                 .padding(.horizontal, 20)
                         }
@@ -64,15 +64,12 @@ struct CombinedUpdateSheet: View {
                             .padding(.top, 28)
                             .padding(.bottom, 8)
 
-                        if let cl = server.changelog {
-                            let md = cl.markdownText
-                            if !md.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                Divider()
-                                    .padding(.horizontal, 20)
-                                releaseNotesSection(md, title: "Changelog")
-                                    .padding(.top, 20)
-                                    .padding(.horizontal, 20)
-                            }
+                        if !server.changelogs.isEmpty {
+                            Divider()
+                                .padding(.horizontal, 20)
+                            serverChangelogSection(server.changelogs)
+                                .padding(.top, 20)
+                                .padding(.horizontal, 20)
                         }
 
                         buttonSection(appUpdate: nil, serverUpdate: server)
@@ -109,7 +106,6 @@ struct CombinedUpdateSheet: View {
     @ViewBuilder
     private func appUpdateSection(_ update: AppUpdateInfo) -> some View {
         VStack(spacing: 12) {
-            // App icon
             Image("AppIconImage")
                 .resizable()
                 .scaledToFill()
@@ -131,10 +127,9 @@ struct CombinedUpdateSheet: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
 
-                // When both present, inline release notes (collapsed)
                 if appUpdate != nil && serverUpdate != nil,
                    !update.releaseNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    releaseNotesSection(update.releaseNotes, title: "App Release Notes")
+                    appReleaseNotesSection(update.releaseNotes)
                         .padding(.horizontal, 20)
                         .padding(.top, 8)
                 }
@@ -147,16 +142,28 @@ struct CombinedUpdateSheet: View {
 
     @ViewBuilder
     private func serverUpdateSection(_ update: ServerUpdateInfo) -> some View {
+        let iconSize: CGFloat = appUpdate != nil && serverUpdate != nil ? 56 : 72
+        // Open WebUI serves its icon at /static/favicon.png
+        let faviconURL: URL? = URL(string: "\(update.serverURL)/static/favicon.png")
+
         VStack(spacing: 12) {
-            // Server icon
-            ZStack {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.blue.opacity(0.12))
-                    .frame(width: appUpdate != nil && serverUpdate != nil ? 56 : 72,
-                           height: appUpdate != nil && serverUpdate != nil ? 56 : 72)
-                Image(systemName: "server.rack")
-                    .font(.system(size: appUpdate != nil && serverUpdate != nil ? 24 : 30, weight: .medium))
-                    .foregroundStyle(Color.blue)
+            CachedAsyncImage(url: faviconURL) { image in
+                image
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: iconSize, height: iconSize)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
+            } placeholder: {
+                // Fallback: blue rounded square with server.rack icon
+                ZStack {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.blue.opacity(0.12))
+                        .frame(width: iconSize, height: iconSize)
+                    Image(systemName: "server.rack")
+                        .font(.system(size: appUpdate != nil && serverUpdate != nil ? 24 : 30, weight: .medium))
+                        .foregroundStyle(Color.blue)
+                }
             }
 
             VStack(spacing: 6) {
@@ -177,15 +184,10 @@ struct CombinedUpdateSheet: View {
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
 
-                // When both present, inline changelog (collapsed)
-                if appUpdate != nil && serverUpdate != nil,
-                   let cl = update.changelog {
-                    let md = cl.markdownText
-                    if !md.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        releaseNotesSection(md, title: "Server Changelog")
-                            .padding(.horizontal, 20)
-                            .padding(.top, 8)
-                    }
+                if appUpdate != nil && serverUpdate != nil, !update.changelogs.isEmpty {
+                    serverChangelogSection(update.changelogs)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 8)
                 }
             }
         }
@@ -193,21 +195,125 @@ struct CombinedUpdateSheet: View {
         .padding(.vertical, appUpdate != nil ? 16 : 0)
     }
 
-    // MARK: - Shared Subviews
+    // MARK: - Native Server Changelog
 
-    private func badgeView(text: String, color: Color) -> some View {
-        Text(text)
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(color))
+    /// Renders the structured changelog entries as native SwiftUI views —
+    /// no MarkdownView, guaranteed correct sizing and theme-aware colors.
+    @ViewBuilder
+    private func serverChangelogSection(_ entries: [ServerChangelogEntry]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Changelog")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(theme.textPrimary)
+                .padding(.bottom, 12)
+
+            ForEach(Array(entries.enumerated()), id: \.offset) { idx, entry in
+                if idx > 0 {
+                    Divider()
+                        .padding(.vertical, 12)
+                }
+                changelogEntryView(entry)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
-    private func releaseNotesSection(_ markdown: String, title: String) -> some View {
+    private func changelogEntryView(_ entry: ServerChangelogEntry) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text(title)
+            // Version + date header
+            let header = entry.date.isEmpty
+                ? "v\(entry.version)"
+                : "v\(entry.version)  ·  \(entry.date)"
+            Text(header)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(theme.textPrimary)
+
+            changelogCategory(label: "What's New", items: entry.added, color: .blue)
+            changelogCategory(label: "Improvements", items: entry.changed, color: .orange)
+            changelogCategory(label: "Bug Fixes", items: entry.fixed, color: .green)
+            changelogCategory(label: "Removed", items: entry.removed, color: .red)
+        }
+    }
+
+    @ViewBuilder
+    private func changelogCategory(label: String, items: [ServerChangelogItem], color: Color) -> some View {
+        if !items.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(label)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(color)
+                    .textCase(.uppercase)
+                    .tracking(0.5)
+
+                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                    changelogItemRow(item)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func changelogItemRow(_ item: ServerChangelogItem) -> some View {
+        let trimmedTitle = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedContent = item.content.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        HStack(alignment: .top, spacing: 8) {
+            // Bullet dot
+            Circle()
+                .fill(theme.textTertiary)
+                .frame(width: 4, height: 4)
+                .padding(.top, 6)
+
+            if !trimmedTitle.isEmpty {
+                // Title + body as attributed string
+                Group {
+                    if trimmedContent.isEmpty {
+                        Text(trimmedTitle)
+                            .fontWeight(.semibold)
+                    } else {
+                        Text(trimmedTitle).fontWeight(.semibold) + Text(" ") + Text(trimmedContent)
+                    }
+                }
+                .font(.system(size: 13))
+                .foregroundStyle(theme.textPrimary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if !trimmedContent.isEmpty {
+                // No explicit title — bold first sentence, plain rest
+                let attributed = attributedChangelogContent(trimmedContent)
+                Text(attributed)
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Splits content at first ". " and bolds the first sentence.
+    private func attributedChangelogContent(_ content: String) -> AttributedString {
+        if let dotRange = content.range(of: ". ") {
+            let title = String(content[content.startIndex..<dotRange.lowerBound]) + "."
+            let body = " " + String(content[dotRange.upperBound...])
+            var result = AttributedString()
+            var boldPart = AttributedString(title)
+            boldPart.font = .system(size: 13, weight: .semibold)
+            var plainPart = AttributedString(body)
+            plainPart.font = .system(size: 13)
+            result.append(boldPart)
+            result.append(plainPart)
+            return result
+        }
+        return AttributedString(content)
+    }
+
+    // MARK: - App Release Notes (MarkdownView)
+
+    @ViewBuilder
+    private func appReleaseNotesSection(_ markdown: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("What's New")
                 .font(.system(size: 14, weight: .semibold))
                 .foregroundStyle(theme.textPrimary)
 
@@ -224,13 +330,23 @@ struct CombinedUpdateSheet: View {
         return t
     }
 
+    // MARK: - Shared Subviews
+
+    private func badgeView(text: String, color: Color) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(color))
+    }
+
     // MARK: - Buttons
 
     @ViewBuilder
     private func buttonSection(appUpdate: AppUpdateInfo?, serverUpdate: ServerUpdateInfo?) -> some View {
         VStack(spacing: 10) {
             if appUpdate != nil {
-                // Primary: Update App on App Store
                 Button {
                     UIApplication.shared.open(Self.appStoreURL)
                     onDismiss()
@@ -250,7 +366,6 @@ struct CombinedUpdateSheet: View {
                 }
             }
 
-            // Later / Dismiss button
             Button {
                 onDismiss()
                 dismiss()
