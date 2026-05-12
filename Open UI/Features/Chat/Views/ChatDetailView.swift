@@ -6,16 +6,13 @@ import QuickLook
 import MarkdownView
 import os.log
 
-// MARK: - Scroll Refs (Bug 9)
+// MARK: - Pump Rate-Limiter
 
-/// Reference box for high-frequency scroll-tracking values.
-/// Stored as a plain `final class` so writes from `onScrollGeometryChange`
-/// and `onChange` closures never trigger a SwiftUI body re-evaluation —
-/// unlike `@State`, property mutations on a reference type are invisible to
-/// the observation system.
-private final class ScrollRefs {
-    var lastScrollOffset: CGFloat = 0
-    var lastProgrammaticScrollTime: Date = .distantPast
+/// A reference-type box that holds the last programmatic scroll timestamp.
+/// Written inside `onScrollGeometryChange` callbacks at high frequency —
+/// using a class avoids SwiftUI @State observation overhead on every write.
+private final class PumpRef {
+    var lastScrollTime: Date = .distantPast
 }
 
 // MARK: - Chat Detail View
@@ -43,24 +40,17 @@ struct ChatDetailView: View {
     @State private var scrollPosition: ScrollPosition = .init()
     /// True when the user has manually scrolled away from the bottom.
     @State private var isScrolledUp = false
-    /// Last known contentOffset.y — used to detect user-initiated upward drags.
-    /// Cached scroll content height — updated via a separate onScrollGeometryChange.
+    /// Cached scroll content height — updated via onScrollGeometryChange.
     @State private var viewState_contentHeight: CGFloat = 0
-    /// Cached scroll container height — updated via a separate onScrollGeometryChange.
+    /// Cached scroll container height — updated via onScrollGeometryChange.
     @State private var viewState_containerHeight: CGFloat = 0
-    // Bug 9: lastScrollOffset and lastProgrammaticScrollTime are written at scroll
-    // velocity (~60 fps) inside geometry-change callbacks, but they are never
-    // rendered in body. Storing them as @State would schedule a ChatDetailView body
-    // re-evaluation on every write. Using a reference box means mutations are direct
-    // property stores — zero SwiftUI invalidation overhead.
-    @State private var _scrollRefs = ScrollRefs()
-
-    /// Hard floor: auto-scroll cannot be disengaged by any scroll-geometry callback
-    /// while this date is in the future.  Set when the user sends a prompt, when
-    /// streaming starts, or when a regeneration begins — covering the window where
-    /// the "minHeight last-turn" layout trick causes large content-offset jumps that
-    /// would otherwise be mis-read as intentional upward drags.
-    @State private var autoScrollLockUntil: Date = .distantPast
+    /// True while a user gesture (finger touch or inertia deceleration) is driving
+    /// the scroll view. This is the ONLY condition under which auto-scroll can be
+    /// disengaged — layout reflows, WKWebView resizes, and programmatic scrolls
+    /// never set this flag because they emit .animating/.idle phases, not .interacting.
+    @State private var isUserDriving = false
+    /// Rate-limit timestamp for the streaming scroll pump (writes are non-rendering).
+    private let _pumpRef = PumpRef()
 
     // MARK: Message pagination (sliding window — memory optimization)
     /// The ending index (exclusive) of the visible message window.
@@ -240,7 +230,7 @@ struct ChatDetailView: View {
                 // expensive blocks finish their first layout pass. Without
                 // this guard the scroll pump fires on each height growth event
                 // and produces multiple position jumps (A3 fix).
-                _scrollRefs.lastProgrammaticScrollTime = Date()
+                _pumpRef.lastScrollTime = Date()
             }
             await viewModel.fetchPinnedModels()
             // Rebuild prompts after load() — models are now fetched with fresh
@@ -1015,23 +1005,11 @@ struct ChatDetailView: View {
             guard new > old else { return }
 
             // ── ALWAYS scroll to bottom when a new message is added ──
-            // No matter where the user is scrolled, sending a message must
-            // bring the new message into view. Re-engage auto-scroll so the
-            // response streams in below it.
             isScrolledUp = false
-            _scrollRefs.lastProgrammaticScrollTime = Date()
-            // Hold the auto-scroll lock: the "minHeight last-turn" layout trick
-            // causes a large, sudden content-height jump that the isStrongDrag
-            // bypass in onScrollGeometryChange would otherwise mis-read as an
-            // intentional upward drag — flipping isScrolledUp back to true before
-            // streaming even begins. The lock window outlasts any layout settling.
-            autoScrollLockUntil = Date().addingTimeInterval(1.5)
+            isUserDriving = false
 
             if old == 0 {
-                // Bug 17: Delay first-message scroll by 250 ms so the welcome view's
-                // 200 ms opacity-out transition finishes before we animate to .bottom.
-                // Without the delay the scroll target moves mid-animation (welcome view
-                // collapses) causing a visible content jump.
+                // Delay first scroll so the welcome view's 200ms opacity-out finishes first.
                 Task { @MainActor in
                     try? await Task.sleep(nanoseconds: 250_000_000)
                     withAnimation(.easeOut(duration: 0.3)) {
@@ -1039,58 +1017,40 @@ struct ChatDetailView: View {
                     }
                 }
             } else if keyboard.isVisible {
-                // Keyboard is open — dismiss it first so its collapsing
-                // animation doesn't fight the scroll animation. After a
-                // short delay (keyboard starts collapsing), flow the
-                // content up with a spring.
                 UIApplication.shared.sendAction(
                     #selector(UIResponder.resignFirstResponder),
                     to: nil, from: nil, for: nil)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    _scrollRefs.lastProgrammaticScrollTime = Date()
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
                         scrollPosition.scrollTo(edge: .bottom)
                     }
                 }
             } else {
-                // Keyboard already hidden (follow-ups, etc.) — scroll now.
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
                     scrollPosition.scrollTo(edge: .bottom)
                 }
             }
         }
-        // Streaming: when streaming starts, only clear the scrolledUp flag
-        // if the user is already near the bottom. If they've manually
-        // scrolled up, respect that position and don't yank them back.
+        // Streaming start: always re-engage auto-scroll. Only a user touch
+        // during the active stream (detected via onScrollPhaseChange) can break it.
         .onChange(of: viewModel.isStreaming) { _, streaming in
             if streaming {
-                // Streaming just started — always reset auto-scroll so the
-                // response streams in from the bottom, regardless of whether
-                // the user had previously scrolled up. Only a manual drag
-                // during the active stream should re-enable the FAB.
                 isScrolledUp = false
-                _scrollRefs.lastProgrammaticScrollTime = Date()
-                // Lock auto-scroll for 1.2s from the start of streaming to cover
-                // the initial layout-churn window (WKWebViews, MarkdownView sizing).
-                autoScrollLockUntil = Date().addingTimeInterval(1.2)
+                isUserDriving = false
                 scrollPosition.scrollTo(edge: .bottom)
             }
         }
-        // Resume auto-scroll: when the user scrolls back to the bottom
-        // (or taps the FAB) during an active stream, re-pin so new
-        // tokens keep the view anchored at the bottom.
+        // Resume auto-scroll: when the user taps the FAB (isScrolledUp → false)
+        // during a stream, scroll back to the bottom immediately.
         .onChange(of: isScrolledUp) { oldValue, newValue in
             if oldValue == true && newValue == false && viewModel.isStreaming {
                 scrollPosition.scrollTo(edge: .bottom)
             }
         }
-        // Regenerate scroll: force-scroll to bottom whenever a regeneration begins,
-        // regardless of whether the user has scrolled up. This ensures the regenerating
-        // message is always visible — identical behaviour to sending a new message.
+        // Regenerate: force-scroll to bottom, clear user-driving state.
         .onChange(of: viewModel.regenerateScrollToken) { _, _ in
             isScrolledUp = false
-            _scrollRefs.lastProgrammaticScrollTime = Date()
-            autoScrollLockUntil = Date().addingTimeInterval(1.5)
+            isUserDriving = false
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 60_000_000) // 60ms layout settle
                 withAnimation(.spring(response: 0.5, dampingFraction: 0.85)) {
@@ -1127,53 +1087,28 @@ struct ChatDetailView: View {
         .defaultScrollAnchor(.bottom)
         .scrollPosition($scrollPosition, anchor: .bottom)
         // Detect scroll position to show/hide FAB + auto-load pagination
+        // Track whether the user's finger (or inertia) is driving the scroll view.
+        // This is the single gate that allows auto-scroll to disengage:
+        // layout reflows, WKWebView resizes, and programmatic scrolls never
+        // emit .interacting — they emit .animating or .idle.
+        .onScrollPhaseChange { _, newPhase in
+            isUserDriving = (newPhase == .interacting || newPhase == .decelerating)
+        }
         .onScrollGeometryChange(for: CGPoint.self) { geo in
             geo.contentOffset
         } action: { _, newOffset in
             let distanceFromBottom = max(0,
                 viewState_contentHeight - newOffset.y - viewState_containerHeight)
             if distanceFromBottom <= 100 {
-                // User scrolled very close to the bottom — re-engage auto-scroll.
+                // Scrolled to within 100pt of the bottom — re-engage auto-scroll.
                 if isScrolledUp { isScrolledUp = false }
-            } else {
-                // Hard floor: if we're inside the auto-scroll lock window (set on send /
-                // streaming start / regenerate), ignore ALL geometry callbacks that could
-                // flip isScrolledUp to true. The "minHeight last-turn" layout trick causes
-                // a large offset jump during this window that isStrongDrag would otherwise
-                // mis-classify as an intentional upward drag.
-                guard Date() >= autoScrollLockUntil else { return }
-
-                // Suppress false "user scrolled up" detection after any programmatic
-                // scroll. The scroll animation itself causes the offset to momentarily
-                // move in various directions, which would otherwise trigger
-                // isScrolledUp = true and break auto-scroll for streaming.
-                let timeSinceProgrammatic = Date().timeIntervalSince(_scrollRefs.lastProgrammaticScrollTime)
-                // During streaming the scroll pump fires every 0.1 s, so we use a
-                // shorter suppression window (0.15 s) to still catch animation bounce
-                // from each pump cycle, while giving the user a window to register
-                // an intentional upward drag.  Outside streaming, keep 0.6 s.
-                let suppressionWindow: TimeInterval = viewModel.isStreaming ? 0.15 : 0.6
-                // A strong upward drag (>30 pt in one callback) is unambiguously
-                // intentional — bypass the time guard entirely so it registers
-                // immediately even during the 0.1 s scroll-pump interval.
-                let dragDelta = _scrollRefs.lastScrollOffset - newOffset.y  // positive = upward
-                let isStrongDrag = dragDelta > 30
-                if !isStrongDrag {
-                    guard timeSinceProgrammatic > suppressionWindow else { return }
-                }
-
-                // During active streaming, any upward movement at all breaks out
-                // immediately so the scroll pump can't fight the user's finger.
-                // Outside of streaming, require a small but intentional drag (8pt)
-                // to avoid accidental break-out from bounce/inertia.
-                let threshold: CGFloat = viewModel.isStreaming ? 2 : 8
-                if newOffset.y < _scrollRefs.lastScrollOffset - threshold {
-                    if !isScrolledUp { isScrolledUp = true }
-                }
+            } else if isUserDriving {
+                // User's finger (or inertia) is actively driving the scroll view —
+                // the ONLY condition under which auto-scroll is allowed to disengage.
+                if !isScrolledUp { isScrolledUp = true }
             }
-            if abs(newOffset.y - _scrollRefs.lastScrollOffset) > 2 {
-                _scrollRefs.lastScrollOffset = newOffset.y
-            }
+            // All other cases (layout reflows, programmatic scrolls, WKWebView resizes)
+            // emit .animating/.idle → isUserDriving is false → no state change.
 
             // ── Sliding window: load older messages when near the top ──
             let total = viewModel.messages.count
@@ -1244,8 +1179,8 @@ struct ChatDetailView: View {
                 // Bug 4: Remove the withAnimation wrapper — overlapping 0.15 s animations
                 // launched every 0.2 s fight each other and produce pogo-stick stutter.
                 // defaultScrollAnchor(.bottom) + scrollTo(edge:) handles momentum natively.
-                if now.timeIntervalSince(_scrollRefs.lastProgrammaticScrollTime) > 0.2 {
-                    _scrollRefs.lastProgrammaticScrollTime = now
+                if now.timeIntervalSince(_pumpRef.lastScrollTime) > 0.2 {
+                    _pumpRef.lastScrollTime = now
                     scrollPosition.scrollTo(edge: .bottom)
                 }
             }

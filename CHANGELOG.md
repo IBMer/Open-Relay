@@ -1,5 +1,13 @@
 # Changelog
 
+## v4.2.1 — May 12, 2026
+
+### Bug Fixes
+- Fixed update notification popup appearing every time the app launches — once dismissed, it won't reappear for that version; the update icon in the sidebar stays visible so you can tap it anytime.
+- Fixed widgets not rendering properly.
+
+## Previous Builds
+
 ## v4.2 — May 10, 2026
 
 ### What's New

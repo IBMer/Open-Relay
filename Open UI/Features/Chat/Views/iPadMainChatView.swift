@@ -707,6 +707,7 @@ struct iPadSidebarContent: View {
     @Environment(\.theme) private var theme
     @State private var drawerChatsDropActive = false
     @State private var showMoveSelectedToFolderSheet = false
+    @State private var showUpdateSheet = false
 
     /// Top-level section collapse states (shared with iPhone via same AppStorage keys).
     @AppStorage("sidebar_folders_expanded") private var foldersExpanded: Bool = true
@@ -1617,8 +1618,7 @@ struct iPadSidebarContent: View {
                 // Update available icon — visible when app or server update is pending
                 if dependencies.updateChecker.pendingUpdate != nil || dependencies.serverUpdateChecker.pendingUpdate != nil {
                     Button {
-                        dependencies.updateChecker.reopenUpdate()
-                        dependencies.serverUpdateChecker.reopenUpdate()
+                        showUpdateSheet = true
                     } label: {
                         ZStack(alignment: .topTrailing) {
                             Image(systemName: "arrow.down.circle.fill")
@@ -1637,6 +1637,17 @@ struct iPadSidebarContent: View {
                     }
                     .accessibilityLabel("Update Available")
                     .transition(.scale.combined(with: .opacity))
+                    .sheet(isPresented: $showUpdateSheet) {
+                        CombinedUpdateSheet(
+                            appUpdate: dependencies.updateChecker.pendingUpdate,
+                            serverUpdate: dependencies.serverUpdateChecker.pendingUpdate,
+                            onDismiss: {
+                                dependencies.updateChecker.dismissUpdate()
+                                dependencies.serverUpdateChecker.dismissUpdate()
+                            }
+                        )
+                        .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                    }
                 }
 
                 // New Chat — primary action, always visible

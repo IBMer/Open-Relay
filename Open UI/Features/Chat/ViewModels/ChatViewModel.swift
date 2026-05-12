@@ -233,10 +233,6 @@ final class ChatViewModel {
     /// Prevents the O(n) task-extraction scan from running on every single token;
     /// it only fires when the content has grown by ≥ 100 chars since the last scan.
     private var lastTaskExtractionLength: Int = 0
-    /// Cached value of the "streamingHaptics" UserDefaults preference.
-    /// Updated whenever UserDefaults.didChangeNotification fires so toggling in
-    /// Settings takes effect immediately without a per-token UserDefaults read.
-    private var streamingHapticsEnabled: Bool = true
     private var activeTaskId: String?
     private var recoveryTimer: Timer?
     /// Cancellable delay task for the initial recovery timer delay.
@@ -569,7 +565,6 @@ final class ChatViewModel {
         setupRetryAttachmentObserver()
         setupMemorySettingObserver()
         setupFunctionsConfigObserver()
-        setupStreamingHapticsObserver()
     }
 
     /// Registers the observer that handles retry requests posted by the
@@ -612,25 +607,6 @@ final class ChatViewModel {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.memoryEnabled = newValue
-            }
-        }
-    }
-
-    /// Seeds `streamingHapticsEnabled` from UserDefaults and keeps it in sync.
-    /// Using a cached Bool avoids a per-token UserDefaults read (the hot path
-    /// calls `triggerStreamingHaptic()` on every token at up to 60 Hz).
-    private func setupStreamingHapticsObserver() {
-        // Seed initial value
-        streamingHapticsEnabled = UserDefaults.standard.object(forKey: "streamingHaptics") as? Bool ?? true
-        // Keep in sync when Settings changes the preference
-        NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            let newValue = UserDefaults.standard.object(forKey: "streamingHaptics") as? Bool ?? true
-            Task { @MainActor [weak self] in
-                self?.streamingHapticsEnabled = newValue
             }
         }
     }
@@ -5571,12 +5547,14 @@ final class ChatViewModel {
         }
     }
 
-    /// Fires a subtle haptic pulse during token streaming, throttled via
-    /// the centralized `Haptics` service to avoid excessive motor usage.
-    /// Uses the cached `streamingHapticsEnabled` flag (updated via
-    /// UserDefaults.didChangeNotification) to avoid a per-token UserDefaults read.
+    /// Fires a subtle haptic pulse during token streaming, throttled to ~3 Hz
+    /// by the centralized `Haptics` service. Reads the preference directly from
+    /// UserDefaults — this is safe at 3 Hz and avoids the stale-cache bug where
+    /// `UserDefaults.didChangeNotification` was not reliably firing for in-process
+    /// `@AppStorage` writes, making the toggle appear to work but have no effect.
     private func triggerStreamingHaptic() {
-        guard streamingHapticsEnabled else { return }
+        // Default is true — only skip if the user explicitly turned it off.
+        guard UserDefaults.standard.object(forKey: "streamingHaptics") as? Bool ?? true else { return }
         Haptics.streamingTick()
     }
 

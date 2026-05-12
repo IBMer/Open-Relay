@@ -110,7 +110,9 @@ private struct RawChangelogEntry: Decodable {
 /// `/api/version/updates` and `/api/changelog`.
 ///
 /// - Runs on every app launch (when authenticated).
-/// - Mirrors the same pending/available pattern as `UpdateChecker`.
+/// - Auto-shows the sheet only the FIRST time a new version is detected.
+///   Once the user dismisses the sheet, that version is marked as "seen" in
+///   UserDefaults — subsequent launches keep the update icon but skip the popup.
 /// - Fails silently — the server check is non-critical.
 @Observable
 @MainActor
@@ -127,16 +129,25 @@ final class ServerUpdateChecker {
     /// `true` while an on-demand check is in progress.
     var isChecking: Bool = false
 
+    /// UserDefaults key storing the last server-update version the user has already seen/dismissed.
+    /// Scoped per server URL so different servers don't share seen state.
+    private static let seenVersionKeyPrefix = "openui.serverUpdate.seenVersion."
+
     // MARK: Public API
 
     /// Checks for a server update using the provided authenticated `APIClient`.
-    /// Safe to call on every app launch.
+    /// Safe to call on every app launch. Auto-shows popup only for unseen versions.
     func checkForUpdates(using apiClient: APIClient?) async {
         guard let apiClient else { return }
         do {
             guard let info = try await fetchUpdateInfo(from: apiClient) else { return }
             pendingUpdate = info
-            availableUpdate = info
+            // Only auto-popup if the user hasn't already dismissed this version
+            let key = Self.seenVersionKeyPrefix + apiClient.baseURL
+            let seenVersion = UserDefaults.standard.string(forKey: key)
+            if seenVersion != info.version {
+                availableUpdate = info
+            }
         } catch {
             // Fail silently
         }
@@ -161,8 +172,13 @@ final class ServerUpdateChecker {
         }
     }
 
-    /// Hides the sheet but keeps `pendingUpdate` so the update icon stays visible.
+    /// Hides the sheet, marks this version as seen so the popup won't reappear
+    /// on future launches, but keeps `pendingUpdate` so the update icon stays visible.
     func dismissUpdate() {
+        if let info = pendingUpdate {
+            let key = Self.seenVersionKeyPrefix + info.serverURL
+            UserDefaults.standard.set(info.version, forKey: key)
+        }
         availableUpdate = nil
     }
 
@@ -172,6 +188,7 @@ final class ServerUpdateChecker {
     }
 
     /// Clears all update state (called on server switch / logout).
+    /// Does NOT clear the seen-version record — that persists intentionally.
     func reset() {
         availableUpdate = nil
         pendingUpdate = nil

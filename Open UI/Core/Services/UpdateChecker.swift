@@ -31,9 +31,10 @@ private struct ITunesAppResult: Decodable {
 /// and surfaces an update notice to the user when one is found.
 ///
 /// - Checks on every app launch and on-demand from Settings → About.
-/// - Shows the sheet on every launch when a newer version exists.
-/// - After the user taps "Later", the sheet hides but `pendingUpdate` stays
-///   set so an update icon can reopen the sheet.
+/// - Auto-shows the sheet only the FIRST time a new version is detected.
+///   Once the user dismisses the sheet ("Later"), that version is marked as
+///   "seen" in UserDefaults — subsequent launches keep the update icon visible
+///   but will NOT auto-show the popup again.
 /// - Fails silently on any network or parsing error.
 @Observable
 @MainActor
@@ -57,10 +58,13 @@ final class UpdateChecker {
     private static let appID = "6759630325"
     private static let lookupURL = URL(string: "https://itunes.apple.com/lookup?id=\(appID)")!
 
+    /// UserDefaults key storing the last app-update version the user has already seen/dismissed.
+    private static let seenVersionKey = "openui.appUpdate.seenVersion"
+
     // MARK: - Public API
 
     /// Checks for updates unconditionally. Safe to call on every app launch.
-    /// Shows the sheet every launch when a newer version exists.
+    /// Auto-shows the sheet only if this version hasn't been seen/dismissed before.
     /// Clears `pendingUpdate` (and thus the icon) when the app is up-to-date.
     func checkForUpdates() async {
         do {
@@ -83,7 +87,11 @@ final class UpdateChecker {
                 releaseURL: releaseURL
             )
             pendingUpdate = info
-            availableUpdate = info   // Triggers the sheet
+            // Only auto-popup if the user hasn't already seen/dismissed this version
+            let seenVersion = UserDefaults.standard.string(forKey: Self.seenVersionKey)
+            if seenVersion != remoteVersion {
+                availableUpdate = info
+            }
         } catch {
             // Fail silently — update check is non-critical
         }
@@ -116,9 +124,13 @@ final class UpdateChecker {
         } catch { }
     }
 
-    /// Called when the user taps "Later" — hides the sheet but keeps
+    /// Called when the user taps "Later" — hides the sheet, marks this version
+    /// as seen so the popup won't reappear on future launches, but keeps
     /// `pendingUpdate` so the update icon remains visible.
     func dismissUpdate() {
+        if let version = pendingUpdate?.version {
+            UserDefaults.standard.set(version, forKey: Self.seenVersionKey)
+        }
         availableUpdate = nil
     }
 

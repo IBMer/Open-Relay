@@ -130,6 +130,11 @@ struct MainChatView: View {
     @State private var exportFileURL: URL?
     @State private var showExportShareSheet = false
 
+    /// Controls the update sheet presented from the sidebar update icon.
+    /// Using a local bool avoids triggering the global `availableUpdate` state
+    /// during the drawer-open animation, which previously caused lag.
+    @State private var showUpdateSheet = false
+
     /// Whether title is being AI-generated.
     @State private var isGeneratingTitle = false
 
@@ -2375,12 +2380,12 @@ struct MainChatView: View {
 
                 Spacer()
 
-                // Update available icon — visible when app or server update is pending
+                // Update available icon — visible when app or server update is pending.
+                // Uses local showUpdateSheet state to avoid triggering the global
+                // availableUpdate binding (which caused drawer-open lag).
                 if dependencies.updateChecker.pendingUpdate != nil || dependencies.serverUpdateChecker.pendingUpdate != nil {
                     Button {
-                        closeDrawer()
-                        dependencies.updateChecker.reopenUpdate()
-                        dependencies.serverUpdateChecker.reopenUpdate()
+                        showUpdateSheet = true
                     } label: {
                         ZStack(alignment: .topTrailing) {
                             Image(systemName: "arrow.down.circle.fill")
@@ -2399,6 +2404,17 @@ struct MainChatView: View {
                     }
                     .accessibilityLabel("Update Available")
                     .transition(.scale.combined(with: .opacity))
+                    .sheet(isPresented: $showUpdateSheet) {
+                        CombinedUpdateSheet(
+                            appUpdate: dependencies.updateChecker.pendingUpdate,
+                            serverUpdate: dependencies.serverUpdateChecker.pendingUpdate,
+                            onDismiss: {
+                                dependencies.updateChecker.dismissUpdate()
+                                dependencies.serverUpdateChecker.dismissUpdate()
+                            }
+                        )
+                        .themed(with: dependencies.appearanceManager, accessibility: dependencies.accessibilityManager)
+                    }
                 }
 
                 // New Chat — primary action, always visible
