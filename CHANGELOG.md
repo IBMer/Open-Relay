@@ -1,5 +1,14 @@
 # Changelog
 
+## v4.5.1 — May 16, 2026
+
+### Improvements
+- Images embedded directly in responses now display inline with no raw data visible during generation
+
+### Bug Fixes
+- Fixed the chat scrolling back to the bottom after streaming ends if the user had manually scrolled up during the response.
+
+
 ## v4.5 — May 15, 2026
 
 ### What's New

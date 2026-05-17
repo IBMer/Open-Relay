@@ -183,8 +183,43 @@ struct StreamingMarkdownView: View {
     /// We therefore pass the real pre-VIZ prose through rather than an empty
     /// placeholder. This fixes the visible flash where the prose text disappeared
     /// during VIZ streaming and only reappeared once the stream finished.
+    /// During streaming, strips any incomplete `![alt](data:image/...` data URI from
+    /// the display string so raw Base64 characters never appear in the chat.
+    ///
+    /// Handles all image formats (`png`, `jpeg`, `gif`, `webp`, `svg+xml`, etc.) because
+    /// the match prefix is `data:image/` — format-agnostic.
+    ///
+    /// **Rules:**
+    /// - Incomplete URI (opening `![` found, no matching closing `)` yet) → strip
+    ///   everything from that `![` to end of string so nothing appears until the
+    ///   full URI has arrived.
+    /// - Complete URI → leave intact; `findMarkdownImages` decodes + renders it.
+    private static func stripIncompleteDataURIs(_ text: String) -> String {
+        // Fast-exit: if no data URI marker exists, nothing to do.
+        guard let dataRange = text.range(of: "](data:image/") else { return text }
+
+        // Walk backwards from the `](data:image/` to find the corresponding `![`.
+        // We need the `![` that immediately precedes this `](`.
+        let beforeBracket = text[text.startIndex..<dataRange.lowerBound]
+        guard let imgOpenRange = beforeBracket.range(of: "![", options: .backwards) else { return text }
+
+        // Now scan forward from the data URI opening to find the closing `)`.
+        let afterDataStart = text[dataRange.lowerBound...]
+        if afterDataStart.last == ")" || afterDataStart.contains(")") {
+            // Closing `)` exists — the URI is complete. Leave it alone.
+            return text
+        }
+
+        // No closing `)` yet — the URI is still streaming in. Strip from `![` to end.
+        let cleanedUpToHere = String(text[text.startIndex..<imgOpenRange.lowerBound])
+        return cleanedUpToHere.trimmingCharacters(in: .newlines)
+    }
+
     private func resolveSegments() -> [ContentSegment] {
-        let content = self.content
+        // When streaming, hide any Base64 data URI that hasn't fully arrived yet.
+        // The raw base64 payload is stripped from display until the closing `)` lands
+        // and `findMarkdownImages` can decode + render the complete image.
+        let content = isStreaming ? Self.stripIncompleteDataURIs(self.content) : self.content
 
         if isStreaming {
             // ── VIZ marker path ───────────────────────────────────────────────

@@ -1048,6 +1048,12 @@ struct ChatDetailView: View {
             let isAssistantAddition = lastMessage?.role == .assistant && old > 0
             guard streamingAutoScroll || !isAssistantAddition else { return }
 
+            // Don't yank the user back to the bottom for post-stream assistant
+            // additions (follow-ups, adoptServerMessages, metadata refreshes) if
+            // they have manually scrolled up. The next message send or streaming
+            // start will re-engage auto-scroll via their own handlers.
+            if isScrolledUp && isAssistantAddition && !viewModel.isStreaming { return }
+
             isScrolledUp = false
             isUserDriving = false
 
