@@ -1,5 +1,14 @@
 # Changelog
 
+## v4.7.1 — May 28, 2026
+
+### Improvements
+- Smoother transitions throughout the app.
+- Fixed iPad sidebar chat list bouncing/hopping when tapping a chat to open it.
+
+### Bug Fixes
+- Fixed terminal WebSocket creating multiple orphaned sessions when reconnecting after switching apps or reopening the terminal panel.
+
 ## v4.7 — May 26, 2026
 
 ### What's New

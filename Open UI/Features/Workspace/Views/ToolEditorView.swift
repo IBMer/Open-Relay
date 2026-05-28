@@ -602,7 +602,7 @@ struct ToolEditorView: View {
             }
             .buttonStyle(.plain)
 
-            if showManifestSection {
+            AnimatedPresence(visible: showManifestSection) {
                 fieldCard {
                     VStack(spacing: 0) {
                         manifestRow(label: "Title", placeholder: "Tool display title", text: $manifestTitle)

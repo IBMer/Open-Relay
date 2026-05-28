@@ -1110,8 +1110,9 @@ private struct MarkdownInlineImageView: View {
                             // We pass the raw string directly to avoid the cost of constructing
                             // a URL from a potentially 500 KB base64 URI.
                             let tokenString = imageURL.absoluteString
+                            let store = InlineImageStore.shared
                             decoded = await Task.detached(priority: .userInitiated) {
-                                guard let dataURI = InlineImageStore.shared.resolve(urlString: tokenString) else {
+                                guard let dataURI = store.resolve(urlString: tokenString) else {
                                     return nil
                                 }
                                 return Self.decodeDataURIString(dataURI)

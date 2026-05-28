@@ -369,32 +369,42 @@ struct ChannelsListView: View {
     private func channelSubtitle(_ channel: Channel) -> some View {
         switch channel.type {
         case .dm:
-            // Show online/offline status for 1-on-1 DMs, or last message snippet
-            if let participant = channel.dmParticipants.first, channel.dmParticipants.count == 1 {
-                Text(participant.isOnline ? "Active now" : "Offline")
-                    .scaledFont(size: 13)
-                    .foregroundStyle(participant.isOnline ? Color.green : theme.textTertiary)
-            } else if let lastMsg = channel.lastMessage {
-                Text(lastMsg.content.prefix(50))
-                    .scaledFont(size: 13)
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
+            // Show online/offline status for 1-on-1 DMs, or last message snippet.
+            // Wrap in AnimatedPresence so the row height interpolates when
+            // dmParticipants load async or lastMessage arrives via socket.
+            let hasDMSubtitle = (channel.dmParticipants.first != nil && channel.dmParticipants.count == 1)
+                || channel.lastMessage != nil
+            AnimatedPresence(visible: hasDMSubtitle) {
+                if let participant = channel.dmParticipants.first, channel.dmParticipants.count == 1 {
+                    Text(participant.isOnline ? "Active now" : "Offline")
+                        .scaledFont(size: 13)
+                        .foregroundStyle(participant.isOnline ? Color.green : theme.textTertiary)
+                } else if let lastMsg = channel.lastMessage {
+                    Text(lastMsg.content.prefix(50))
+                        .scaledFont(size: 13)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
             }
-            
+
         case .group:
-            if let description = channel.description, !description.isEmpty {
-                Text(description)
-                    .scaledFont(size: 13)
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
+            AnimatedPresence(visible: !(channel.description ?? "").isEmpty) {
+                if let description = channel.description, !description.isEmpty {
+                    Text(description)
+                        .scaledFont(size: 13)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
             }
-            
+
         case .standard:
-            if let description = channel.description, !description.isEmpty {
-                Text(description)
-                    .scaledFont(size: 13)
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(1)
+            AnimatedPresence(visible: !(channel.description ?? "").isEmpty) {
+                if let description = channel.description, !description.isEmpty {
+                    Text(description)
+                        .scaledFont(size: 13)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(1)
+                }
             }
         }
     }

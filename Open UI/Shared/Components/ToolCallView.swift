@@ -2257,7 +2257,7 @@ struct ToolCallView: View {
             .buttonStyle(.plain)
 
             // ── Body ─────────────────────────────────────────────────────
-            if isExpanded {
+            AnimatedPresence(visible: isExpanded) {
                 VStack(alignment: .leading, spacing: Spacing.sm) {
                     // Arguments (INPUT)
                     if let args = toolCall.arguments, !args.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2294,8 +2294,9 @@ struct ToolCallView: View {
                     }
                 }
                 .padding(.bottom, Spacing.sm)
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            } else if hasEmbeds && toolCall.isDone {
+            }
+
+            if !isExpanded && hasEmbeds && toolCall.isDone {
                 // Rich UI embeds always visible even when collapsed
                 VStack(alignment: .leading, spacing: Spacing.sm) {
                     ForEach(Array(toolCall.embeds.enumerated()), id: \.offset) { _, embedHTML in
@@ -2388,7 +2389,7 @@ private struct MixedToolCallGroup: View {
             .buttonStyle(.plain)
 
             // Expanded: render items in order (tool calls + inline reasoning)
-            if isExpanded {
+            AnimatedPresence(visible: isExpanded) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(items.enumerated()), id: \.offset) { idx, item in
                         switch item {
@@ -2404,7 +2405,6 @@ private struct MixedToolCallGroup: View {
                         }
                     }
                 }
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.horizontal, 12)
@@ -2524,6 +2524,10 @@ struct ReasoningView: View {
             .buttonStyle(.plain)
 
             // Expanded reasoning content
+            // NOTE: AnimatedPresence is intentionally NOT used here.
+            // The reasoning text grows live during streaming — AnimatedPresence's
+            // GeometryReader-background measures the constrained height, not the
+            // natural height, so it locks the frame too early and truncates the text.
             if isExpanded {
                 Text(reasoning.content)
                     .scaledFont(size: 12, weight: .regular)
@@ -2533,7 +2537,7 @@ struct ReasoningView: View {
                     .padding(.trailing, Spacing.sm)
                     .padding(.bottom, Spacing.sm)
                     .textSelection(.enabled)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .transition(.opacity)
             }
         }
         .padding(.horizontal, Spacing.xs)
@@ -2715,8 +2719,13 @@ struct AssistantMessageContent: View {
         VStack(alignment: .leading, spacing: Spacing.xs) {
             if ordered.segments.isEmpty && isStreaming {
                 // Show typing indicator when streaming with no content yet.
-                // TypingIndicator has a fixed 44×22pt frame — no HStack/Spacer needed.
-                TypingIndicator()
+                // Wrap in HStack+Spacer to pin the indicator to the leading edge.
+                // Without this, the infinity-width VStack container can misplace
+                // or stretch the 44×22pt fixed view.
+                HStack(spacing: 0) {
+                    TypingIndicator()
+                    Spacer()
+                }
             } else {
                 // Render each segment in the order it appears in the content.
                 // Adjacent tool calls are grouped together with dividers
@@ -2810,8 +2819,13 @@ struct AssistantMessageContent: View {
                         return true
                     }()
                     if lastIsNonText {
-                        // TypingIndicator has a fixed 44×22pt frame — no HStack/Spacer needed.
-                        TypingIndicator()
+                        // Wrap in HStack+Spacer to pin the indicator to the leading edge.
+                        // Without this, the infinity-width VStack container can misplace
+                        // or stretch the 44×22pt fixed view.
+                        HStack(spacing: 0) {
+                            TypingIndicator()
+                            Spacer()
+                        }
                     }
                 }
             }

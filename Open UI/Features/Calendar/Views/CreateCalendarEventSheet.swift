@@ -166,7 +166,7 @@ struct CreateCalendarEventSheet: View {
                             }
                             .buttonStyle(.plain)
 
-                            if showAlertPicker {
+                            AnimatedPresence(visible: showAlertPicker) {
                                 VStack(spacing: 0) {
                                     ForEach(reminderOptions, id: \.label) { option in
                                         Button {

@@ -300,68 +300,69 @@ struct ProfileView: View {
                     .padding(.vertical, 14)
                 }
 
-                if showPasswordSection {
-                    Divider().padding(.leading, Spacing.md)
+                AnimatedPresence(visible: showPasswordSection) {
+                    VStack(spacing: 0) {
+                        Divider().padding(.leading, Spacing.md)
 
-                    VStack(spacing: Spacing.md) {
-                        SecureField("Current Password", text: $currentPassword)
-                            .textContentType(.password)
-                            .padding(Spacing.md)
-                            .background(theme.surfaceContainer)
-                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                        VStack(spacing: Spacing.md) {
+                            SecureField("Current Password", text: $currentPassword)
+                                .textContentType(.password)
+                                .padding(Spacing.md)
+                                .background(theme.surfaceContainer)
+                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
 
-                        SecureField("New Password", text: $newPassword)
-                            .textContentType(.newPassword)
-                            .padding(Spacing.md)
-                            .background(theme.surfaceContainer)
-                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                            SecureField("New Password", text: $newPassword)
+                                .textContentType(.newPassword)
+                                .padding(Spacing.md)
+                                .background(theme.surfaceContainer)
+                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
 
-                        SecureField("Confirm New Password", text: $confirmPassword)
-                            .textContentType(.newPassword)
-                            .padding(Spacing.md)
-                            .background(theme.surfaceContainer)
-                            .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
+                            SecureField("Confirm New Password", text: $confirmPassword)
+                                .textContentType(.newPassword)
+                                .padding(Spacing.md)
+                                .background(theme.surfaceContainer)
+                                .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
 
-                        if let error = passwordChangeError {
-                            Text(error)
-                                .scaledFont(size: 12, weight: .medium)
-                                .foregroundStyle(theme.error)
-                        }
-
-                        if passwordChangeSuccess {
-                            HStack(spacing: Spacing.xs) {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundStyle(theme.success)
-                                Text("Password changed successfully")
+                            if let error = passwordChangeError {
+                                Text(error)
                                     .scaledFont(size: 12, weight: .medium)
-                                    .foregroundStyle(theme.success)
+                                    .foregroundStyle(theme.error)
                             }
-                        }
 
-                        Button {
-                            Task { await changePassword() }
-                        } label: {
-                            HStack {
-                                if isChangingPassword {
-                                    ProgressView().controlSize(.small)
+                            if passwordChangeSuccess {
+                                HStack(spacing: Spacing.xs) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(theme.success)
+                                    Text("Password changed successfully")
+                                        .scaledFont(size: 12, weight: .medium)
+                                        .foregroundStyle(theme.success)
                                 }
-                                Text("Update Password")
-                                    .scaledFont(size: 15, weight: .semibold)
                             }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, Spacing.sm)
+
+                            Button {
+                                Task { await changePassword() }
+                            } label: {
+                                HStack {
+                                    if isChangingPassword {
+                                        ProgressView().controlSize(.small)
+                                    }
+                                    Text("Update Password")
+                                        .scaledFont(size: 15, weight: .semibold)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, Spacing.sm)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(theme.brandPrimary)
+                            .disabled(
+                                currentPassword.isEmpty ||
+                                newPassword.count < 8 ||
+                                newPassword != confirmPassword ||
+                                isChangingPassword
+                            )
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(theme.brandPrimary)
-                        .disabled(
-                            currentPassword.isEmpty ||
-                            newPassword.count < 8 ||
-                            newPassword != confirmPassword ||
-                            isChangingPassword
-                        )
+                        .padding(Spacing.md)
                     }
-                    .padding(Spacing.md)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
             .background(theme.surfaceContainer)

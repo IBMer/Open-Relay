@@ -17,9 +17,15 @@ import os.log
 ///   6. Send  binary frames  ← from SwiftTerm keystrokes
 ///   7. Send  text  `{"type":"ping"}`  every 25 s (keepalive)
 ///
-/// Auto-reconnect: on disconnect the VM waits 1 s, 2 s, 4 s before giving up.
-/// Calling `reconnectIfNeeded()` (e.g. when the panel becomes visible) triggers
-/// an immediate reconnect attempt regardless of retry state.
+/// Lifecycle:
+/// - Call `handlePanelOpened()` whenever the terminal panel becomes visible.
+/// - Call `handlePanelClosed()` whenever the panel is hidden/dismissed.
+/// - Call `handleAppBackground()` when the app goes to background (scenePhase).
+/// - Call `handleAppForeground()` when the app returns to foreground (scenePhase).
+/// - Call `reset()` when switching chats (full teardown).
+///
+/// Auto-reconnect: on unexpected disconnect the VM waits 1 s, 2 s, 4 s… before giving up.
+/// Intentional disconnects (panel closed, app backgrounded) suppress auto-reconnect.
 @MainActor @Observable
 final class TerminalBrowserViewModel {
     // MARK: - File Browser State
@@ -59,6 +65,14 @@ final class TerminalBrowserViewModel {
     private var wsReceiveTask: Task<Void, Never>?
     private var wsPingTask: Task<Void, Never>?
     private var terminalSessionId: String?
+
+    // Set to true when WE initiated the disconnect (panel closed, app backgrounded).
+    // Prevents the receive-loop error path from triggering auto-reconnect.
+    private var intentionalDisconnect: Bool = false
+
+    // True while the terminal panel is visible — used to gate auto-reconnect
+    // so we don't reconnect when the panel is closed.
+    private var isPanelOpen: Bool = false
 
     // Auto-reconnect
     private var autoReconnectTask: Task<Void, Never>?
@@ -105,6 +119,7 @@ final class TerminalBrowserViewModel {
 
     func reset() {
         cancelAutoReconnect()
+        intentionalDisconnect = true
         disconnectWebSocket()
         currentPath = "/home/user"
         items = []
@@ -114,12 +129,77 @@ final class TerminalBrowserViewModel {
         isShellStarting = false
         isShellReady = false
         isTerminalExpanded = false
+        isPanelOpen = false
         showNewFolderAlert = false
         newFolderName = ""
         renamingFile = nil
         renameText = ""
         terminalView = nil
         reconnectAttempt = 0
+        terminalSessionId = nil
+        intentionalDisconnect = false
+    }
+
+    // MARK: - Panel Lifecycle
+
+    /// Call when the terminal panel becomes visible (panel slides open, terminal section expands).
+    func handlePanelOpened() {
+        isPanelOpen = true
+        intentionalDisconnect = false
+        reconnectIfNeeded()
+    }
+
+    /// Call when the terminal panel is hidden/dismissed (panel slides closed, file browser closed).
+    /// Cleanly disconnects the WebSocket without a full reset so the session can be resumed.
+    func handlePanelClosed() {
+        isPanelOpen = false
+        guard isShellReady || isShellStarting else { return }
+        logger.info("Terminal panel closed — disconnecting WebSocket cleanly")
+        intentionalDisconnect = true
+        cancelAutoReconnect()
+        tearDownWebSocket()
+        isShellReady = false
+        isShellStarting = false
+        // Keep terminalSessionId so we can attempt to reconnect to the same session later
+    }
+
+    /// Call when the app goes to background (scenePhase == .background/.inactive).
+    /// Stops the ping loop to save battery but leaves the WebSocket open so the
+    /// PTY session keeps running on the server (e.g. a script waiting for input).
+    /// iOS will drop the socket naturally when the process is suspended — we'll
+    /// detect that via the receive loop error and reconnect to the same session
+    /// when we return to the foreground.
+    func handleAppBackground() {
+        // Cancel the ping loop so we're not burning battery/network in the background.
+        wsPingTask?.cancel()
+        wsPingTask = nil
+        // Cancel any pending auto-reconnect timers.
+        cancelAutoReconnect()
+        logger.info("App backgrounded — ping loop stopped, WebSocket left open")
+        // NOTE: intentionalDisconnect stays false so if iOS kills the socket
+        // the receive-loop will still flag it as an unexpected disconnect.
+        // We just won't auto-reconnect until foreground is restored.
+    }
+
+    /// Call when the app returns to foreground (scenePhase == .active).
+    /// Restarts the ping loop if the shell is still alive, or reconnects to
+    /// the existing PTY session if iOS dropped the socket while suspended.
+    func handleAppForeground() {
+        guard isPanelOpen, isTerminalExpanded else { return }
+        intentionalDisconnect = false
+
+        if isShellReady, let wsTask, wsTask.state == .running {
+            // Socket is still alive — just restart the ping loop.
+            logger.info("App foregrounded — shell alive, restarting ping loop")
+            wsPingTask = Task { await pingLoop() }
+        } else {
+            // Socket was dropped — reconnect to the existing PTY session.
+            logger.info("App foregrounded — socket dropped, reconnecting to existing session")
+            isShellReady = false
+            isShellStarting = false
+            reconnectAttempt = 0
+            reconnectIfNeeded()
+        }
     }
 
     // MARK: - Navigation
@@ -215,12 +295,43 @@ final class TerminalBrowserViewModel {
 
     // MARK: - WebSocket Shell Session
 
-    /// Start a fresh shell session. Guards against double-start.
+    /// Connects to an existing PTY session (no new POST). Used when returning
+    /// from background or after an unexpected WebSocket drop.
+    func reconnectToExistingSession() async {
+        guard let apiClient, !serverId.isEmpty else { return }
+        guard let sessionId = terminalSessionId else {
+            // No existing session — fall through to creating a fresh one.
+            await startShell()
+            return
+        }
+        guard !isShellReady, !isShellStarting else { return }
+
+        isShellStarting = true
+        intentionalDisconnect = false
+
+        do {
+            let wsURL = try buildWebSocketURL(sessionId: sessionId)
+            logger.info("Reconnecting to existing PTY session \(sessionId)")
+            connectWebSocket(url: wsURL, token: apiClient.network.authToken ?? "")
+            reconnectAttempt = 0
+        } catch {
+            isShellStarting = false
+            isShellReady = false
+            logger.error("Failed to reconnect to existing session: \(error.localizedDescription)")
+            // Existing session may be gone — create a fresh one
+            terminalSessionId = nil
+            scheduleAutoReconnect()
+        }
+    }
+
+    /// Start a brand-new shell session (POSTs to create a new PTY on the server).
     func startShell() async {
         guard let apiClient, !serverId.isEmpty else { return }
         guard !isShellReady, !isShellStarting else { return }
 
         isShellStarting = true
+        intentionalDisconnect = false
+
         do {
             // Step 1: Create terminal session on the server
             let sessionId = try await apiClient.terminalCreateSession(serverId: serverId)
@@ -248,16 +359,22 @@ final class TerminalBrowserViewModel {
         }
     }
 
-    /// Call this whenever the terminal panel becomes visible (panel opens,
+    /// Call this whenever the terminal section becomes visible (panel opens,
     /// terminal section expands, fullscreen toggled). If the shell is not
-    /// running it will start/reconnect immediately without needing a button tap.
+    /// running it will reconnect to the existing session or start a new one.
     func reconnectIfNeeded() {
         guard !isShellReady, !isShellStarting else { return }
         guard apiClient != nil, !serverId.isEmpty else { return }
         // Cancel any pending backoff reconnect — we want to reconnect NOW
         cancelAutoReconnect()
         reconnectAttempt = 0
-        Task { await startShell() }
+        intentionalDisconnect = false
+        if terminalSessionId != nil {
+            // Reconnect to the existing PTY — don't spin up a new session
+            Task { await reconnectToExistingSession() }
+        } else {
+            Task { await startShell() }
+        }
     }
 
     private func buildWebSocketURL(sessionId: String) throws -> URL {
@@ -405,8 +522,10 @@ final class TerminalBrowserViewModel {
                 }
             } catch {
                 if Task.isCancelled { break }
+                // Only treat as unexpected if we didn't intentionally close things
+                if intentionalDisconnect { break }
                 logger.error("WS receive error: \(error.localizedDescription)")
-                await handleDisconnect()
+                await handleUnexpectedDisconnect()
                 break
             }
         }
@@ -416,9 +535,9 @@ final class TerminalBrowserViewModel {
         while !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 25_000_000_000) // 25 seconds
             if Task.isCancelled { break }
-            guard isShellReady else { break }
+            guard isShellReady, !intentionalDisconnect else { break }
             guard let wsTask, wsTask.state == .running else {
-                // Task is no longer running — handleDisconnect will be called
+                // Task is no longer running — handleUnexpectedDisconnect will be called
                 // by the receive loop error, so just exit ping loop
                 break
             }
@@ -427,15 +546,16 @@ final class TerminalBrowserViewModel {
     }
 
     @MainActor
-    private func handleDisconnect() async {
-        guard isShellReady else { return }
+    private func handleUnexpectedDisconnect() async {
+        guard isShellReady, !intentionalDisconnect else { return }
         isShellReady = false
         tearDownWebSocket()
-        terminalSessionId = nil
-        logger.info("Terminal WebSocket disconnected")
+        // Keep terminalSessionId — we want to reconnect to the same PTY, not create a new one
+        logger.info("Terminal WebSocket disconnected unexpectedly")
 
-        // Auto-reconnect — only if the terminal panel is still open/expanded
-        if isTerminalExpanded {
+        // Auto-reconnect — only if the panel is open and terminal section is expanded
+        if isPanelOpen && isTerminalExpanded {
+            feedToTerminal("\r\n\u{001B}[33m[Connection lost — reconnecting…]\u{001B}[0m\r\n")
             scheduleAutoReconnect()
         }
     }
@@ -460,7 +580,12 @@ final class TerminalBrowserViewModel {
         autoReconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delay)
             guard !Task.isCancelled else { return }
-            await self?.startShell()
+            // Reconnect to the existing PTY session if we have one
+            if let self, self.terminalSessionId != nil {
+                await self.reconnectToExistingSession()
+            } else {
+                await self?.startShell()
+            }
         }
     }
 
@@ -472,6 +597,7 @@ final class TerminalBrowserViewModel {
     // MARK: - Cleanup
 
     func disconnectWebSocket() {
+        intentionalDisconnect = true
         cancelAutoReconnect()
         tearDownWebSocket()
         terminalSessionId = nil

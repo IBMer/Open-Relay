@@ -738,22 +738,26 @@ private struct ConversationRow: View {
                     .foregroundStyle(theme.textTertiary)
             }
 
-            if let lastMessage = conversation.messages.last {
-                Text(lastMessage.content)
-                    .scaledFont(size: 14, context: .list)
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(2)
+            AnimatedPresence(visible: conversation.messages.last != nil) {
+                if let lastMessage = conversation.messages.last {
+                    Text(lastMessage.content)
+                        .scaledFont(size: 14, context: .list)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(2)
+                }
             }
 
-            if !conversation.tags.isEmpty {
-                HStack(spacing: Spacing.xs) {
-                    ForEach(conversation.tags, id: \.self) { tag in
-                        Text(tag)
-                            .scaledFont(size: 12, weight: .medium)
-                            .pillStyle(
-                                background: theme.brandPrimary.opacity(OpacityLevel.subtle),
-                                foreground: theme.brandPrimary
-                            )
+            AnimatedPresence(visible: !conversation.tags.isEmpty) {
+                if !conversation.tags.isEmpty {
+                    HStack(spacing: Spacing.xs) {
+                        ForEach(conversation.tags, id: \.self) { tag in
+                            Text(tag)
+                                .scaledFont(size: 12, weight: .medium)
+                                .pillStyle(
+                                    background: theme.brandPrimary.opacity(OpacityLevel.subtle),
+                                    foreground: theme.brandPrimary
+                                )
+                        }
                     }
                 }
             }

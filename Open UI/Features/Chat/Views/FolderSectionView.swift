@@ -75,8 +75,12 @@ struct FolderRow: View {
             folderHeader
 
             // ── Expanded chat list ──────────────────────────────────
-            if folder.isExpanded {
-                expandedContent
+            // AnimatedPresence interpolates the List row height so expand/collapse
+            // doesn't snap — it smoothly grows/shrinks the row instead.
+            AnimatedPresence(visible: folder.isExpanded) {
+                if folder.isExpanded {
+                    expandedContent
+                }
             }
         }
         // Drop target: accept chats dropped onto this folder

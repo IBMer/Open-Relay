@@ -957,6 +957,11 @@ struct MainChatView: View {
             .onChange(of: scenePhase) { oldPhase, newPhase in
                 if newPhase == .active && oldPhase != .active {
                     Task { await refreshAllDataOnForeground() }
+                    // Reconnect terminal WebSocket if the panel is open and terminal is expanded
+                    terminalBrowserVM.handleAppForeground()
+                } else if newPhase == .background || newPhase == .inactive {
+                    // Cleanly disconnect terminal WebSocket before iOS suspends us
+                    terminalBrowserVM.handleAppBackground()
                 }
             }
             .onChange(of: activeConversationId) { _, _ in
@@ -1185,6 +1190,8 @@ struct MainChatView: View {
             showFileBrowser = true
             fileBrowserDragOffset = 0
         }
+        // Notify VM the panel is open so it connects if needed
+        terminalBrowserVM.handlePanelOpened()
         // Explicitly load directory after opening to ensure files appear
         // (the .task modifier may have fired before configure() was called)
         terminalBrowserVM.refresh()
@@ -1197,6 +1204,8 @@ struct MainChatView: View {
             showFileBrowser = false
             fileBrowserDragOffset = 0
         }
+        // Cleanly disconnect the WebSocket when the panel is dismissed
+        terminalBrowserVM.handlePanelClosed()
     }
 
     // MARK: - New Chat

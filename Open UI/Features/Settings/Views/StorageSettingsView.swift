@@ -372,7 +372,7 @@ struct StorageSettingsView: View {
             .buttonStyle(.plain)
 
             // File entries (only when expanded)
-            if isExpanded {
+            AnimatedPresence(visible: isExpanded) {
                 if entries.isEmpty {
                     Text("Empty")
                         .scaledFont(size: 14)

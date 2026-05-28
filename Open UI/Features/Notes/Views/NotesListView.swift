@@ -199,11 +199,13 @@ private struct NoteRowView: View {
                     .foregroundStyle(theme.textTertiary)
             }
 
-            if !note.contentPreview.isEmpty {
-                Text(note.contentPreview)
-                    .scaledFont(size: 14)
-                    .foregroundStyle(theme.textSecondary)
-                    .lineLimit(2)
+            AnimatedPresence(visible: !note.contentPreview.isEmpty) {
+                if !note.contentPreview.isEmpty {
+                    Text(note.contentPreview)
+                        .scaledFont(size: 14)
+                        .foregroundStyle(theme.textSecondary)
+                        .lineLimit(2)
+                }
             }
 
             HStack(spacing: Spacing.sm) {
@@ -213,25 +215,29 @@ private struct NoteRowView: View {
                     .foregroundStyle(theme.textTertiary)
 
                 // Audio indicator
-                if !note.audioAttachments.isEmpty {
-                    HStack(spacing: 2) {
-                        Image(systemName: "waveform")
-                            .scaledFont(size: 10)
-                        Text("\(note.audioAttachments.count)")
+                AnimatedPresence(visible: !note.audioAttachments.isEmpty) {
+                    if !note.audioAttachments.isEmpty {
+                        HStack(spacing: 2) {
+                            Image(systemName: "waveform")
+                                .scaledFont(size: 10)
+                            Text("\(note.audioAttachments.count)")
+                        }
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.brandPrimary)
                     }
-                    .scaledFont(size: 12, weight: .medium)
-                    .foregroundStyle(theme.brandPrimary)
                 }
 
                 // File indicator
-                if !note.fileAttachments.isEmpty {
-                    HStack(spacing: 2) {
-                        Image(systemName: "paperclip")
-                            .scaledFont(size: 10)
-                        Text("\(note.fileAttachments.count)")
+                AnimatedPresence(visible: !note.fileAttachments.isEmpty) {
+                    if !note.fileAttachments.isEmpty {
+                        HStack(spacing: 2) {
+                            Image(systemName: "paperclip")
+                                .scaledFont(size: 10)
+                            Text("\(note.fileAttachments.count)")
+                        }
+                        .scaledFont(size: 12, weight: .medium)
+                        .foregroundStyle(theme.textTertiary)
                     }
-                    .scaledFont(size: 12, weight: .medium)
-                    .foregroundStyle(theme.textTertiary)
                 }
 
                 Spacer()

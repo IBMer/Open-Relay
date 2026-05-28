@@ -60,12 +60,15 @@ struct ChatMessageBubble<Content: View>: View {
                     .background(theme.chatBubbleUser)
                     .clipShape(UserBubbleShape())
 
-                if showTimestamp, let ts = timestamp {
-                    Text(ts, style: .time)
-                        .scaledFont(size: 11)
-                        .foregroundStyle(theme.textTertiary)
-                        .padding(.trailing, 4)
-                        .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .trailing)))
+                // AnimatedPresence smoothly expands the ~18pt height when the
+                // timestamp toggles (user tap) instead of snapping.
+                AnimatedPresence(visible: showTimestamp && timestamp != nil) {
+                    if showTimestamp, let ts = timestamp {
+                        Text(ts, style: .time)
+                            .scaledFont(size: 11)
+                            .foregroundStyle(theme.textTertiary)
+                            .padding(.trailing, 4)
+                    }
                 }
             }
         }
@@ -80,11 +83,12 @@ struct ChatMessageBubble<Content: View>: View {
             content()
                 .foregroundStyle(theme.chatBubbleAssistantText)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if showTimestamp, let ts = timestamp {
-                Text(ts, style: .time)
-                    .scaledFont(size: 11)
-                    .foregroundStyle(theme.textTertiary)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .leading)))
+            AnimatedPresence(visible: showTimestamp && timestamp != nil) {
+                if showTimestamp, let ts = timestamp {
+                    Text(ts, style: .time)
+                        .scaledFont(size: 11)
+                        .foregroundStyle(theme.textTertiary)
+                }
             }
         }
         .padding(.horizontal, Spacing.screenPadding)

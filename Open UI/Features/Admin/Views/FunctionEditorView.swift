@@ -272,7 +272,7 @@ struct FunctionEditorView: View {
             }
             .buttonStyle(.plain)
 
-            if showManifestSection {
+            AnimatedPresence(visible: showManifestSection) {
                 fieldCard {
                     VStack(spacing: 0) {
                         manifestRow(label: "Title", placeholder: "Display title", text: $manifestTitle)

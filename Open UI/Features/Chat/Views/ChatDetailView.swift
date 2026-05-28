@@ -1440,15 +1440,17 @@ struct ChatDetailView: View {
             messageBubble(for: message, isLastAssistant: isLastAssistant)
 
             // ── Tool-generated images ──
-            if message.role == .assistant && !message.isStreaming {
-                let vIdx = activeVersionIndex[message.id] ?? -1
-                let displayFiles: [ChatMessageFile] = {
-                    if vIdx >= 0 && vIdx < message.versions.count {
-                        return message.versions[vIdx].files
-                    }
-                    return message.files
-                }()
-                if !displayFiles.isEmpty {
+            // AnimatedPresence smoothly expands the height when files become available
+            // (i.e. when streaming completes and displayFiles becomes non-empty).
+            let vIdxFiles = activeVersionIndex[message.id] ?? -1
+            let displayFiles: [ChatMessageFile] = {
+                if vIdxFiles >= 0 && vIdxFiles < message.versions.count {
+                    return message.versions[vIdxFiles].files
+                }
+                return message.files
+            }()
+            AnimatedPresence(visible: message.role == .assistant && !message.isStreaming && !displayFiles.isEmpty) {
+                if message.role == .assistant && !message.isStreaming && !displayFiles.isEmpty {
                     messageFilesView(files: displayFiles)
                         .padding(.horizontal, Spacing.screenPadding)
                         .padding(.top, Spacing.xs)
@@ -1456,15 +1458,15 @@ struct ChatDetailView: View {
             }
 
             // ── Sources bar ──
-            if message.role == .assistant && !message.isStreaming {
-                let vIdx = activeVersionIndex[message.id] ?? -1
-                let displaySources: [ChatSourceReference] = {
-                    if vIdx >= 0 && vIdx < message.versions.count {
-                        return message.versions[vIdx].sources
-                    }
-                    return message.sources
-                }()
-                if !displaySources.isEmpty {
+            let vIdxSrc = activeVersionIndex[message.id] ?? -1
+            let displaySources: [ChatSourceReference] = {
+                if vIdxSrc >= 0 && vIdxSrc < message.versions.count {
+                    return message.versions[vIdxSrc].sources
+                }
+                return message.sources
+            }()
+            AnimatedPresence(visible: message.role == .assistant && !message.isStreaming && !displaySources.isEmpty) {
+                if message.role == .assistant && !message.isStreaming && !displaySources.isEmpty {
                     sourcesBar(sources: displaySources, messageId: message.id)
                         .padding(.horizontal, Spacing.screenPadding)
                         .padding(.top, Spacing.xs)
@@ -1472,35 +1474,39 @@ struct ChatDetailView: View {
             }
 
             // ── Inline error ──
-            if let error = message.error {
-                messageErrorView(error.content ?? String(localized: "An error occurred"))
-                    .padding(.horizontal, Spacing.screenPadding)
+            AnimatedPresence(visible: message.error != nil) {
+                if let error = message.error {
+                    messageErrorView(error.content ?? String(localized: "An error occurred"))
+                        .padding(.horizontal, Spacing.screenPadding)
+                }
             }
 
-            // ── Assistant action bar (always visible) ──
-            if message.role == .assistant && !message.isStreaming {
-                assistantActionBar(for: message)
-                    .padding(.horizontal, Spacing.screenPadding)
-                    .padding(.top, Spacing.xs)
-                    // Popover must live at the row level (not inside the ForEach action bar)
-                    // so that every message gets its own independent popover anchor.
-                    // Attaching it inside assistantActionBar (which is called inside ForEach)
-                    // causes SwiftUI to only register the last one.
-                    .popover(isPresented: Binding(
-                        get: { usagePopoverMessageId == message.id },
-                        set: { if !$0 { usagePopoverMessageId = nil } }
-                    ), arrowEdge: .bottom) {
-                        let vIdx = activeVersionIndex[message.id] ?? -1
-                        let popoverUsage: [String: Any] = {
-                            if vIdx >= 0 && vIdx < message.versions.count {
-                                return message.versions[vIdx].usage ?? [:]
-                            }
-                            return message.usage ?? [:]
-                        }()
-                        UsageInfoPopover(usage: popoverUsage)
-                            .themed()
-                            .presentationCompactAdaptation(.popover)
-                    }
+            // ── Assistant action bar (appears when streaming ends) ──
+            AnimatedPresence(visible: message.role == .assistant && !message.isStreaming) {
+                if message.role == .assistant && !message.isStreaming {
+                    assistantActionBar(for: message)
+                        .padding(.horizontal, Spacing.screenPadding)
+                        .padding(.top, Spacing.xs)
+                        // Popover must live at the row level (not inside the ForEach action bar)
+                        // so that every message gets its own independent popover anchor.
+                        // Attaching it inside assistantActionBar (which is called inside ForEach)
+                        // causes SwiftUI to only register the last one.
+                        .popover(isPresented: Binding(
+                            get: { usagePopoverMessageId == message.id },
+                            set: { if !$0 { usagePopoverMessageId = nil } }
+                        ), arrowEdge: .bottom) {
+                            let vIdx = activeVersionIndex[message.id] ?? -1
+                            let popoverUsage: [String: Any] = {
+                                if vIdx >= 0 && vIdx < message.versions.count {
+                                    return message.versions[vIdx].usage ?? [:]
+                                }
+                                return message.usage ?? [:]
+                            }()
+                            UsageInfoPopover(usage: popoverUsage)
+                                .themed()
+                                .presentationCompactAdaptation(.popover)
+                        }
+                }
             }
 
             // ── User message version arrows (always visible when edit history exists) ──
@@ -1511,25 +1517,22 @@ struct ChatDetailView: View {
             }
 
             // ── Follow-up suggestions (last assistant message only) ──
-            if isLastAssistant && !message.isStreaming {
-                let vIdx = activeVersionIndex[message.id] ?? -1
-                let displayFollowUps: [String] = {
-                    if vIdx >= 0 && vIdx < message.versions.count {
-                        return message.versions[vIdx].followUps
-                    }
-                    return message.followUps
-                }()
-                if !displayFollowUps.isEmpty {
+            let vIdxFU = activeVersionIndex[message.id] ?? -1
+            let displayFollowUps: [String] = {
+                if vIdxFU >= 0 && vIdxFU < message.versions.count {
+                    return message.versions[vIdxFU].followUps
+                }
+                return message.followUps
+            }()
+            AnimatedPresence(visible: isLastAssistant && !message.isStreaming && !displayFollowUps.isEmpty) {
+                if isLastAssistant && !message.isStreaming && !displayFollowUps.isEmpty {
                     followUpSuggestions(displayFollowUps)
                         .padding(.horizontal, Spacing.screenPadding)
                         .padding(.top, Spacing.sm)
-                        // Use simple opacity transition — .move(edge: .bottom) triggers
-                        // a layout re-measurement during animation that can temporarily
-                        // make the scroll content wider than the screen, enabling 2D pan.
-                        .transition(.opacity)
                 }
             }
         }
+        .clipped()
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("\(message.role == .user ? "You" : "Assistant"): \(message.content.prefix(200))"))
     }
@@ -3549,8 +3552,17 @@ private struct IsolatedAssistantMessage: View {
         let effectiveIsStreaming = isActivelyStreaming || message.isStreaming
 
         if effectiveIsStreaming && rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // TypingIndicator has a fixed 44×22pt frame — no HStack/Spacer needed.
-            TypingIndicator()
+            // Wrap in HStack+Spacer to pin the indicator to the leading edge.
+            // Without this, the infinity-width assistant content frame can
+            // misplace or stretch the 44×22pt fixed view.
+            // minHeight: 44 ensures the new message row has enough natural height
+            // from the first frame so the minHeight-VStack scroll anchor doesn't
+            // position the TypingIndicator above/overlapping the row header.
+            HStack(spacing: 0) {
+                TypingIndicator()
+                Spacer()
+            }
+            .frame(minHeight: 44)
         } else if isActivelyStreaming && streamingStore.frozenBoundary > 0 {
 
 

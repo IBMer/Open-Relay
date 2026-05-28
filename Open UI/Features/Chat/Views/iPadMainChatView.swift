@@ -170,6 +170,14 @@ struct iPadMainChatView: View {
             showExportShareSheet: $showExportShareSheet,
             onSocketSetup: { registerSocketReconnectHandler() }
         )
+        // Terminal WebSocket lifecycle — disconnect on background, reconnect on foreground
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            if newPhase == .active && oldPhase != .active {
+                terminalBrowserVM.handleAppForeground()
+            } else if newPhase == .background || newPhase == .inactive {
+                terminalBrowserVM.handleAppBackground()
+            }
+        }
         // Channel-specific lifecycle wiring
         .task {
             // Configure and load channels — must pass currentUserId for DM participant filtering
@@ -385,6 +393,7 @@ struct iPadMainChatView: View {
                             withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                                 showTerminalBrowser = false
                             }
+                            terminalBrowserVM.handlePanelClosed()
                         }
                     )
                     .frame(width: 340)
@@ -392,6 +401,7 @@ struct iPadMainChatView: View {
                     .transition(.move(edge: .trailing))
                     .onAppear {
                         configureTerminalBrowserIfNeeded()
+                        terminalBrowserVM.handlePanelOpened()
                         terminalBrowserVM.refresh()
                     }
                 }
@@ -405,9 +415,11 @@ struct iPadMainChatView: View {
                         withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
                             if showTerminalBrowser {
                                 showTerminalBrowser = false
+                                terminalBrowserVM.handlePanelClosed()
                             } else {
                                 configureTerminalBrowserIfNeeded()
                                 showTerminalBrowser = true
+                                terminalBrowserVM.handlePanelOpened()
                                 terminalBrowserVM.refresh()
                             }
                         }
@@ -937,7 +949,11 @@ struct iPadSidebarContent: View {
     /// matching the web UI's "Models" section above folders.
     @ViewBuilder
     private var pinnedModelsSection: some View {
-        let vm = dependencies.activeChatStore.viewModel(for: activeConversationId)
+        // Always use the new-chat VM (nil) for pinned models — it's a global user preference,
+        // not per-conversation. Using activeConversationId here caused the section to collapse
+        // and re-expand every time a chat was tapped (new VM's availableModels starts empty,
+        // then loads async), which was the root cause of the sidebar bounce.
+        let vm = dependencies.activeChatStore.viewModel(for: nil)
         let pinnedIds = vm.pinnedModelIds
         let models = vm.availableModels
         let pinnedModels = pinnedIds.compactMap { id in models.first(where: { $0.id == id }) }
@@ -982,11 +998,11 @@ struct iPadSidebarContent: View {
                                 .foregroundStyle(isSelected ? theme.textPrimary : theme.textSecondary)
                                 .lineLimit(1)
                             Spacer()
-                            if isSelected {
-                                Image(systemName: "checkmark")
-                                    .scaledFont(size: 11, weight: .semibold, context: .list)
-                                    .foregroundStyle(theme.brandPrimary)
-                            }
+                            // Always render checkmark to avoid layout shifts on insertion/removal
+                            Image(systemName: "checkmark")
+                                .scaledFont(size: 11, weight: .semibold, context: .list)
+                                .foregroundStyle(theme.brandPrimary)
+                                .opacity(isSelected ? 1 : 0)
                         }
                         .padding(.horizontal, Spacing.md)
                         .padding(.vertical, 7)
@@ -995,6 +1011,7 @@ struct iPadSidebarContent: View {
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .transaction { $0.animation = nil }
                     .contextMenu {
                         Button(role: .destructive) {
                             vm.togglePinModel(model.id)
@@ -1466,24 +1483,24 @@ struct iPadSidebarContent: View {
                     activeFolderWorkspaceId = nil
                     SharedDataService.shared.saveLastActiveConversationId(conversation.id)
                 } label: {
+                    let isActive = activeConversationId == conversation.id
                     HStack {
                         Text(conversation.title)
                             .scaledFont(size: 14, context: .list)
-                            .fontWeight(activeConversationId == conversation.id ? .semibold : .regular)
-                            .foregroundStyle(activeConversationId == conversation.id
-                                ? theme.textPrimary : theme.textSecondary)
+                            .fontWeight(isActive ? .semibold : .regular)
+                            .foregroundStyle(isActive ? theme.textPrimary : theme.textSecondary)
                             .lineLimit(1)
                         Spacer()
-                        if activeConversationId == conversation.id {
-                            Circle()
-                                .fill(theme.brandPrimary)
-                                .frame(width: 6, height: 6)
-                        }
+                        // Always render Circle to avoid layout shifts on insertion/removal
+                        Circle()
+                            .fill(theme.brandPrimary)
+                            .frame(width: 6, height: 6)
+                            .opacity(isActive ? 1 : 0)
                     }
                     .padding(.horizontal, Spacing.md)
                     .padding(.vertical, 8)
                     .background(
-                        activeConversationId == conversation.id
+                        isActive
                             ? theme.brandPrimary.opacity(0.1)
                             : Color.clear
                     )
@@ -1491,6 +1508,8 @@ struct iPadSidebarContent: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                // Suppress implicit animations on selection state change to prevent sidebar bounce
+                .transaction { $0.animation = nil }
                 .draggable(DraggableChat(
                     conversationId: conversation.id,
                     currentFolderId: conversation.folderId

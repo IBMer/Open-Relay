@@ -807,20 +807,26 @@ struct ChannelDetailView: View {
             }
             
             // Reactions (MF-003: with tooltip on long-press)
-            if !message.reactions.isEmpty {
-                reactionsBar(message)
-                    .padding(.top, 3)
-            }
-            
-            if message.hasThread {
-                ThreadReplyBadge(
-                    replyCount: message.replyCount,
-                    latestReplyAt: message.latestReplyAt
-                ) {
-                    Task { await viewModel.openThread(for: message) }
-                    Haptics.play(.light)
+            // AnimatedPresence smoothly expands height when reactions arrive via socket
+            AnimatedPresence(visible: !message.reactions.isEmpty) {
+                if !message.reactions.isEmpty {
+                    reactionsBar(message)
+                        .padding(.top, 3)
                 }
-                .padding(.top, 3)
+            }
+
+            // Thread reply badge — smoothly appears when a thread reply is created
+            AnimatedPresence(visible: message.hasThread) {
+                if message.hasThread {
+                    ThreadReplyBadge(
+                        replyCount: message.replyCount,
+                        latestReplyAt: message.latestReplyAt
+                    ) {
+                        Task { await viewModel.openThread(for: message) }
+                        Haptics.play(.light)
+                    }
+                    .padding(.top, 3)
+                }
             }
             
             if showGroupTimestamp && !showSenderHeader {

@@ -181,7 +181,10 @@ final class ShareViewController: UIViewController {
     private static func loadData(from provider: NSItemProvider,
                                  typeIdentifier: String,
                                  fallbackMIME: String?) async -> SharedFileAttachment? {
-        await withCheckedContinuation { continuation in
+        // Capture suggestedName before entering the @Sendable closure to avoid
+        // capturing the non-Sendable NSItemProvider across a concurrency boundary.
+        let suggestedName = provider.suggestedName
+        return await withCheckedContinuation { continuation in
             provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
                 guard let data, !data.isEmpty else {
                     continuation.resume(returning: nil)
@@ -190,7 +193,7 @@ final class ShareViewController: UIViewController {
                 let utType = UTType(typeIdentifier)
                 let mime = utType?.preferredMIMEType ?? fallbackMIME
                 let ext = utType?.preferredFilenameExtension ?? "bin"
-                let name = provider.suggestedName ?? "attachment.\(ext)"
+                let name = suggestedName ?? "attachment.\(ext)"
                 continuation.resume(returning: SharedFileAttachment(name: name,
                                                                      data: data,
                                                                      mimeType: mime))

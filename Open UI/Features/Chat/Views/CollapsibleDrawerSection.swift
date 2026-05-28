@@ -54,10 +54,9 @@ struct CollapsibleDrawerSection<Content: View>: View {
             .buttonStyle(.plain)
 
             // ── Content (hidden when collapsed) ──────────────────────
-            if isExpanded {
+            AnimatedPresence(visible: isExpanded) {
                 content()
                     .padding(.top, 2)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
     }

@@ -745,7 +745,7 @@ struct AdminModelsGlobalSettingsSheet: View {
             }
             .buttonStyle(.plain)
 
-            if showSuggestions {
+            AnimatedPresence(visible: showSuggestions) {
                 VStack(spacing: Spacing.md) {
                     // Use ID-based iteration to avoid index-out-of-bounds crash on delete
                     ForEach(viewModel.suggestions) { suggestion in
@@ -885,7 +885,7 @@ struct AdminModelsGlobalSettingsSheet: View {
             }
             .buttonStyle(.plain)
 
-            if showCapabilities {
+            AnimatedPresence(visible: showCapabilities) {
                 VStack(alignment: .leading, spacing: Spacing.sm) {
                     Text("Capabilities")
                         .scaledFont(size: 12, weight: .semibold)
@@ -1005,7 +1005,7 @@ struct AdminModelsGlobalSettingsSheet: View {
             }
             .buttonStyle(.plain)
 
-            if showParams {
+            AnimatedPresence(visible: showParams) {
                 VStack(spacing: 0) {
                     // Streaming & Function Calling
                     paramGroupHeader("Streaming & Function Calling")

@@ -703,7 +703,7 @@ struct ModelEditorView: View {
             }
 
             // Only show the card when Custom mode is active
-            if useCustomPrompts {
+            AnimatedPresence(visible: useCustomPrompts) {
                 fieldCard {
                     VStack(spacing: 0) {
                         ForEach(Array(suggestionPrompts.enumerated()), id: \.offset) { idx, _ in
@@ -2030,7 +2030,7 @@ struct ModelAdvancedParamsSection: View {
             }
             .buttonStyle(.plain)
 
-            if showAdvancedParams {
+            AnimatedPresence(visible: showAdvancedParams) {
                 advancedParamsContent
             }
         }

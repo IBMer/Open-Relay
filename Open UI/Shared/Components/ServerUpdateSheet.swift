@@ -313,10 +313,6 @@ struct CombinedUpdateSheet: View {
     @ViewBuilder
     private func appReleaseNotesSection(_ markdown: String) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("What's New")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(theme.textPrimary)
-
             MarkdownView(markdown, theme: markdownTheme)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
