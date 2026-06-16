@@ -1029,7 +1029,7 @@ final class SocketIOService: NSObject, @unchecked Sendable, URLSessionWebSocketD
             reconnectTimer?.invalidate()
             reconnectTimer = nil
         } else {
-            DispatchQueue.main.sync { [weak self] in
+            DispatchQueue.main.async { [weak self] in
                 self?.reconnectTimer?.invalidate()
                 self?.reconnectTimer = nil
             }

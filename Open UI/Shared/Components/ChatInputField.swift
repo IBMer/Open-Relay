@@ -111,6 +111,8 @@ struct ChatInputField: View {
     @Binding var selectedKnowledgeItems: [KnowledgeItem]
     // Reference chat bindings
     @Binding var selectedReferenceChats: [ReferenceChatItem]
+    // Notes bindings
+    @Binding var selectedNotes: [Note]
     var onHashTrigger: ((String) -> Void)?
     var onHashDismiss: (() -> Void)?
 
@@ -128,7 +130,22 @@ struct ChatInputField: View {
     var onCameraCapture: (() -> Void)?
     var onWebAttachment: (() -> Void)?
     var onReferenceChatAttachment: (() -> Void)?
+    var onFilesAttachment: (() -> Void)?
+    var onNotesAttachment: (() -> Void)?
+    var onKnowledgeAttachment: (() -> Void)?
     var onVoiceInput: (() -> Void)?
+
+    // Data sources for inline attach pickers (passed through to ToolsMenuSheet)
+    var apiClient: APIClient? = nil
+    var notesManager: NotesManager? = nil
+    var conversationManager: ConversationManager? = nil
+    /// Called when the user selects files from the inline files picker.
+    var onFilesSelected: (([ChatAttachment]) -> Void)? = nil
+
+    // Skills
+    var skills: [SkillItem] = []
+    @Binding var selectedSkillIds: [String]
+    var isLoadingSkills: Bool = false
 
     // Dictation
     var onDictationStart: (() -> Void)?
@@ -278,9 +295,22 @@ struct ChatInputField: View {
                 onPhotoAttachment: onPhotoAttachment,
                 onCameraCapture: onCameraCapture,
                 onWebAttachment: onWebAttachment,
+                onFilesAttachment: onFilesAttachment,
+                onNotesAttachment: onNotesAttachment,
+                onKnowledgeAttachment: onKnowledgeAttachment,
                 onReferenceChatAttachment: onReferenceChatAttachment,
+                apiClient: apiClient,
+                notesManager: notesManager,
+                conversationManager: conversationManager,
+                selectedNotes: $selectedNotes,
+                selectedKnowledgeItems: $selectedKnowledgeItems,
+                selectedReferenceChats: $selectedReferenceChats,
+                onFilesSelected: onFilesSelected,
                 photoPicker: photoPicker,
-                onOpenToolUserValves: onOpenToolUserValves
+                onOpenToolUserValves: onOpenToolUserValves,
+                skills: skills,
+                selectedSkillIds: $selectedSkillIds,
+                isLoadingSkills: isLoadingSkills
             )
         }
         .onChange(of: showToolsSheet) { _, isPresented in
@@ -339,6 +369,17 @@ struct ChatInputField: View {
                     ))
             }
 
+            // Note chips (above text input)
+            if !selectedNotes.isEmpty {
+                noteChipsStrip
+                    .padding(.horizontal, 10)
+                    .padding(.top, (mentionedModel != nil || !selectedKnowledgeItems.isEmpty || !selectedReferenceChats.isEmpty) ? 4 : 8)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .top).combined(with: .opacity),
+                        removal: .opacity
+                    ))
+            }
+
             // Main text input row — center alignment keeps + and send/voice
             // button symmetrically aligned with the text on all line counts.
             // The trailing buttons are grouped into a single fixed-size HStack
@@ -355,7 +396,7 @@ struct ChatInputField: View {
                 .fixedSize(horizontal: true, vertical: false)
             }
             .padding(.horizontal, 12)
-            .padding(.top, (selectedKnowledgeItems.isEmpty && selectedReferenceChats.isEmpty && mentionedModel == nil) ? 10 : 6)
+            .padding(.top, (selectedKnowledgeItems.isEmpty && selectedReferenceChats.isEmpty && selectedNotes.isEmpty && mentionedModel == nil) ? 10 : 6)
             .padding(.bottom, hasQuickPills ? 6 : 10)
 
             // Quick pills row (only when pills are configured)
@@ -879,6 +920,51 @@ struct ChatInputField: View {
 
             Spacer()
         }
+    }
+
+    // MARK: - Note Chips Strip
+
+    private var noteChipsStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(selectedNotes) { item in
+                    noteChip(item)
+                }
+            }
+        }
+    }
+
+    private func noteChip(_ item: Note) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: "note.text")
+                .scaledFont(size: 10, weight: .semibold)
+                .foregroundStyle(theme.brandPrimary)
+            Text(item.title.isEmpty ? "Untitled" : item.title)
+                .scaledFont(size: 12, weight: .medium)
+                .foregroundStyle(theme.textPrimary)
+                .lineLimit(1)
+            Text("Note")
+                .scaledFont(size: 9, weight: .semibold)
+                .foregroundStyle(theme.textTertiary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(Capsule().fill(theme.surfaceContainer.opacity(0.8)))
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    selectedNotes.removeAll { $0.id == item.id }
+                }
+                Haptics.play(.light)
+            } label: {
+                Image(systemName: "xmark")
+                    .scaledFont(size: 8, weight: .bold)
+                    .foregroundStyle(theme.textTertiary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(theme.brandPrimary.opacity(0.08)))
+        .overlay(Capsule().strokeBorder(theme.brandPrimary.opacity(0.25), lineWidth: 0.5))
     }
 
     // MARK: - Reference Chat Chips Strip

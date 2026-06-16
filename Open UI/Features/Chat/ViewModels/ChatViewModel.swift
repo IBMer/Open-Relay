@@ -159,6 +159,8 @@ final class ChatViewModel {
     var knowledgeItems: [KnowledgeItem] = []
     /// Reference chat conversations selected for context in the next message.
     var selectedReferenceChats: [ReferenceChatItem] = []
+    /// Notes selected as context for the next message (injected as inline text, not file refs).
+    var selectedNotes: [Note] = []
     var isLoadingTools: Bool = false
     /// Available terminal servers fetched from the backend.
     var availableTerminalServers: [TerminalServer] = []
@@ -224,6 +226,7 @@ final class ChatViewModel {
     private var socketService: SocketIOService?
     /// Weak reference to the shared ASR service, set via configure().
     private weak var asrService: OnDeviceASRService?
+    private weak var notesManager: NotesManager?
     private var streamingTask: Task<Void, Never>?
     /// Active transcription tasks keyed by attachment ID.
     /// Stored here so they survive navigation — the VM lives in ActiveChatStore
@@ -583,8 +586,9 @@ final class ChatViewModel {
     /// Weak reference to the shared store — used to write back model cache.
     private weak var activeChatStore: ActiveChatStore?
 
-    func configure(with manager: ConversationManager, socket: SocketIOService? = nil, store: ActiveChatStore? = nil, asr: OnDeviceASRService? = nil) {
+    func configure(with manager: ConversationManager, socket: SocketIOService? = nil, store: ActiveChatStore? = nil, asr: OnDeviceASRService? = nil, notes: NotesManager? = nil) {
         self.manager = manager
+        self.notesManager = notes
         self.socketService = socket
         self.serverBaseURL = manager.baseURL
         self.activeChatStore = store
@@ -2555,6 +2559,10 @@ final class ChatViewModel {
         let currentReferenceChats = selectedReferenceChats
         selectedReferenceChats = []
 
+        // Capture and clear notes — sent as file refs (type "note") in the API request.
+        let currentNotes = selectedNotes
+        selectedNotes = []
+
         // Capture and clear skill IDs — sent as skill_ids in the API request.
         let currentSkillIds = selectedSkillIds
         selectedSkillIds = []
@@ -2667,6 +2675,16 @@ final class ChatViewModel {
                 type: knowledgeItem.type.rawValue,
                 url: knowledgeItem.id,
                 name: knowledgeItem.name,
+                contentType: nil
+            ))
+        }
+        // Store note refs on the user message so they appear as pills in the chat bubble.
+        for note in currentNotes {
+            let noteTitle = note.title.isEmpty ? "Untitled" : note.title
+            messageFiles.append(ChatMessageFile(
+                type: "note",
+                url: note.id,
+                name: noteTitle,
                 contentType: nil
             ))
         }
@@ -2840,6 +2858,16 @@ final class ChatViewModel {
                 }
                 for refChat in currentReferenceChats {
                     allFileRefs.append(refChat.toChatFileRef())
+                }
+                for note in currentNotes {
+                    let noteTitle = note.title.isEmpty ? "Untitled" : note.title
+                    allFileRefs.append([
+                        "type": "note",
+                        "id": note.id,
+                        "name": noteTitle,
+                        "data": ["content": ["md": note.content]],
+                        "status": "processed"
+                    ])
                 }
                 if !allFileRefs.isEmpty { request.files = allFileRefs }
 
@@ -3209,6 +3237,39 @@ final class ChatViewModel {
                     "models": capturedUserNode.models.isEmpty ? [modelId] : capturedUserNode.models
                 ]
                 request.userMessage = userMsgDict
+
+                // Re-include files (notes, knowledge, uploaded files) from the original user node.
+                let capturedNotesManager = self.notesManager
+                if !capturedUserNode.files.isEmpty {
+                    var fileRefs: [[String: Any]] = []
+                    for storedFile in capturedUserNode.files {
+                        guard let fileId = storedFile.url else { continue }
+                        if storedFile.type == "note" {
+                            var ref: [String: Any] = [
+                                "type": "note",
+                                "id": fileId,
+                                "name": storedFile.name ?? "Note",
+                                "status": "processed"
+                            ]
+                            if let note = await capturedNotesManager?.fetchNote(id: fileId) {
+                                ref["data"] = ["content": ["md": note.content]]
+                            }
+                            fileRefs.append(ref)
+                        } else if storedFile.type == "collection" {
+                            fileRefs.append([
+                                "type": "collection",
+                                "id": fileId,
+                                "name": storedFile.name ?? fileId
+                            ])
+                        } else {
+                            var ref: [String: Any] = ["type": storedFile.type ?? "file", "id": fileId]
+                            if let name = storedFile.name { ref["name"] = name }
+                            if let ct = storedFile.contentType { ref["content_type"] = ct }
+                            fileRefs.append(ref)
+                        }
+                    }
+                    if !fileRefs.isEmpty { request.files = fileRefs }
+                }
 
                 // Populate all common request fields
                 await self.populateCommonRequestFields(&request)
@@ -3598,6 +3659,40 @@ final class ChatViewModel {
                     "models": [modelId]
                 ]
                 request.userMessage = editUserMsgDict
+
+                // Re-include files (notes, knowledge, uploaded files) from the original user node.
+                let editNotesManager = self.notesManager
+                let editUserFiles = self.conversation?.history.nodes[lastUser.id]?.files ?? lastUser.files
+                if !editUserFiles.isEmpty {
+                    var fileRefs: [[String: Any]] = []
+                    for storedFile in editUserFiles {
+                        guard let fileId = storedFile.url else { continue }
+                        if storedFile.type == "note" {
+                            var ref: [String: Any] = [
+                                "type": "note",
+                                "id": fileId,
+                                "name": storedFile.name ?? "Note",
+                                "status": "processed"
+                            ]
+                            if let note = await editNotesManager?.fetchNote(id: fileId) {
+                                ref["data"] = ["content": ["md": note.content]]
+                            }
+                            fileRefs.append(ref)
+                        } else if storedFile.type == "collection" {
+                            fileRefs.append([
+                                "type": "collection",
+                                "id": fileId,
+                                "name": storedFile.name ?? fileId
+                            ])
+                        } else {
+                            var ref: [String: Any] = ["type": storedFile.type ?? "file", "id": fileId]
+                            if let name = storedFile.name { ref["name"] = name }
+                            if let ct = storedFile.contentType { ref["content_type"] = ct }
+                            fileRefs.append(ref)
+                        }
+                    }
+                    if !fileRefs.isEmpty { request.files = fileRefs }
+                }
 
                 // Populate all common request fields (model metadata, features, params,
                 // system variables, tool IDs, terminal, background tasks, etc.)
@@ -4345,6 +4440,18 @@ final class ChatViewModel {
         let title = conversation?.title ?? "Chat"
         let preview = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !preview.isEmpty else { return }
+
+        // Sync activeConversationId to the real server-assigned ID before firing the
+        // notification. For new chats, activeConversationId was set to the local UUID
+        // (localId) at sendMessage() time, but by now the server has assigned a real ID
+        // stored in conversationId / conversation?.id. The willPresent suppression check
+        // compares chatId == activeConversationId — without this sync the IDs mismatch
+        // and an in-app notification banner fires incorrectly.
+        if !chatId.isEmpty {
+            await MainActor.run {
+                NotificationService.shared.activeConversationId = chatId
+            }
+        }
 
         await NotificationService.shared.notifyGenerationComplete(
             conversationId: chatId,

@@ -36,6 +36,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
         config.delegateClass = ShortcutSceneDelegate.self
         return config
     }
+
+    /// Called when the user explicitly force-quits the app (swipe up in the app switcher).
+    /// NOT called when iOS silently kills the suspended process under memory pressure.
+    ///
+    /// This distinction is the key to the "restore where you left off" behaviour:
+    /// - Force quit → this fires → we clear lastActiveConversationId → next launch gets new chat.
+    /// - iOS background kill → this does NOT fire → lastActiveConversationId stays set → next
+    ///   launch restores the user back into the chat they were in.
+    func applicationWillTerminate(_ application: UIApplication) {
+        SharedDataService.shared.saveLastActiveConversationId(nil)
+    }
 }
 
 /// Scene delegate that intercepts shortcut items on both cold and warm launch.

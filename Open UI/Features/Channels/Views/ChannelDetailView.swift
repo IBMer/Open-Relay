@@ -624,6 +624,7 @@ struct ChannelDetailView: View {
             if abs(newSize.width - contentHeight) > 1 { contentHeight = newSize.width }
             if abs(newSize.height - containerHeight) > 1 { containerHeight = newSize.height }
         }
+        .background(ScrollViewEdgeEffectDisabler())
     }
     
     // MARK: - Message Grouping
@@ -1513,5 +1514,33 @@ struct ChannelBubbleShape: InsettableShape {
         bezier.close()
         return Path(bezier.cgPath)
     }
+}
+
+// MARK: - iOS 26 Liquid Glass Edge Effect Disabler
+//
+// Walks up the UIView hierarchy from a hidden background view to find the enclosing
+// UIScrollView and disables the iOS 26 "Liquid Glass" frosty blur at the scroll edge.
+
+private struct ScrollViewEdgeEffectDisabler: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isHidden = true
+        view.isUserInteractionEnabled = false
+        DispatchQueue.main.async {
+            var current: UIView? = view.superview
+            while let sv = current {
+                if let scrollView = sv as? UIScrollView {
+                    // iOS 26 "Liquid Glass" frosty blur at scroll edges.
+                    // edgeEffectEnabled is not yet in the public SDK headers,
+                    // so we use KVC to set it at runtime.
+                    scrollView.setValue(false, forKey: "edgeEffectEnabled")
+                    break
+                }
+                current = sv.superview
+            }
+        }
+        return view
+    }
+    func updateUIView(_ uiView: UIView, context: Context) {}
 }
 

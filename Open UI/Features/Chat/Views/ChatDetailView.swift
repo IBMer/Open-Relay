@@ -8,11 +8,18 @@ import os.log
 
 // MARK: - Pump Rate-Limiter
 
-/// A reference-type box that holds the last programmatic scroll timestamp.
+/// A reference-type box that holds the last programmatic scroll timestamp
+/// and the last scroll offset Y for nav-bar direction detection.
 /// Written inside `onScrollGeometryChange` callbacks at high frequency —
 /// using a class avoids SwiftUI @State observation overhead on every write.
 private final class PumpRef {
     var lastScrollTime: Date = .distantPast
+    /// Last offset used to compute scroll direction for nav-bar hide/show.
+    var lastNavBarOffsetY: CGFloat = 0
+    /// When set, suppresses all nav-bar hide/show reactions until this date.
+    /// Armed before every programmatic scrollTo() call so reflow-induced offset
+    /// changes (FAB scroll, stream start, pagination) never trigger the nav bar.
+    var programmaticScrollUntil: Date = .distantPast
 }
 
 // MARK: - Chat Detail View
@@ -66,6 +73,10 @@ struct ChatDetailView: View {
     @State private var isUserDriving = false
     /// Rate-limit timestamp for the streaming scroll pump (writes are non-rendering).
     private let _pumpRef = PumpRef()
+    /// Whether the navigation bar is currently hidden.
+    /// HIDE: any downward scroll (immediately, regardless of distance from bottom).
+    /// SHOW: any upward manual scroll, or when scrolled back to bottom (FAB disappears).
+    @State private var navBarHidden = false
     /// Whether streaming responses should automatically scroll the chat to the bottom.
     /// Enabled by default (matches existing behaviour). Users can disable in Chat Behavior settings.
     @AppStorage("streamingAutoScroll") private var streamingAutoScroll = true
@@ -146,6 +157,9 @@ struct ChatDetailView: View {
     @State private var showWebURLAlert = false
     @State private var webURLInput = ""
     @State private var showReferenceChatPicker = false
+    @State private var showServerFilesPicker = false
+    @State private var showNotesPicker = false
+    @State private var showKnowledgeFromMenuPicker = false
 
     // MARK: #URL inline suggestion
     @State private var detectedWebURL: String?
@@ -213,6 +227,15 @@ struct ChatDetailView: View {
             theme.background.ignoresSafeArea()
             messageListArea
         }
+        // Fill the status-bar / nav-bar region with the correct background color
+        // so that when the nav bar is hidden there is no black gap at the top.
+        // frame(height:0) + ignoresSafeArea(.top) expands upward into the safe area
+        // without pushing any content down.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            theme.background
+                .frame(height: 0)
+                .ignoresSafeArea(edges: .top)
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if editingMessageId != nil {
                 editInputBar
@@ -222,58 +245,9 @@ struct ChatDetailView: View {
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar { toolbarContent }
-        .task {
-            // Start keyboard tracking FIRST so the bottom inset is
-            // correct for the very first layout pass (D9 fix).
-            keyboard.start()
-            if let manager = dependencies.conversationManager {
-                viewModel.configure(with: manager, socket: dependencies.socketService, store: dependencies.activeChatStore, asr: dependencies.asrService)
-            }
-            // Perform non-async setup before awaiting load() so the UI
-            // populates prompts and temporary-chat state instantly.
-            if viewModel.isNewConversation {
-                viewModel.isTemporaryChat = UserDefaults.standard.bool(forKey: "temporaryChatDefault")
-            }
-            // Only resolve prompts pre-load for new chats — existing chats
-            // already have a model; we'll resolve after load() below (D10 fix).
-            if viewModel.isNewConversation {
-                randomPrompts = Self.resolvePromptSuggestions(
-                    adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
-                    modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
-                    count: promptCardCount
-                )
-            }
-            NotificationService.shared.activeConversationId =
-                viewModel.conversationId ?? viewModel.conversation?.id
-            await viewModel.load()
-            // After messages load, pin the window to the latest messages.
-            // Do NOT issue a programmatic scrollTo here — defaultScrollAnchor(.bottom)
-            // already places the view at the bottom on first layout, and a redundant
-            // scrollTo after a sleep fights WKWebView / code-block height settling
-            // and produces the visible "bounce" the user reported (A1 fix).
-            let loadedCount = viewModel.messages.count
-            if loadedCount > 0 {
-                isScrolledUp = false
-                windowEnd = nil
-                windowSize = min(maxWindowSize, loadedCount)
-                // Suppress the content-height-driven streaming scroll while
-                // WKWebViews, MarkdownView, and other expensive blocks finish
-                // their first layout pass. The pump interval is 400 ms; adding
-                // a 500 ms offset gives ~900 ms total dead-zone — enough for
-                // WKWebViews on older devices to report their rendered heights
-                // via JS postMessage without triggering scroll position jumps
-                // (A3 fix, extended for lazy WKWebView init).
-                _pumpRef.lastScrollTime = Date().addingTimeInterval(0.5)
-            }
-            await viewModel.fetchPinnedModels()
-            // Rebuild prompts after load() — models are now fetched with fresh
-            // suggestion_prompts from the server.
-            randomPrompts = Self.resolvePromptSuggestions(
-                adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
-                modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
-                count: promptCardCount
-            )
-        }
+        .toolbarVisibility(navBarHidden ? .hidden : .visible, for: .navigationBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .task { await handleViewTask() }
         // Reactive fallback: if backendConfig wasn't ready when .task ran
         // (first app launch), rebuild prompts as soon as the config arrives.
         // Watch the suggestion count (Int?) — always Equatable, avoids
@@ -301,16 +275,7 @@ struct ChatDetailView: View {
         .onAppear {
             viewModel.syncOnEntry()
         }
-        .onDisappear {
-            keyboard.stop()
-            // Stop TTS playback and clear state when navigating away from chat
-            if speakingMessageId != nil || ttsGeneratingMessageId != nil {
-                dependencies.textToSpeechService.stop()
-                speakingMessageId = nil
-                ttsGeneratingMessageId = nil
-            }
-            NotificationService.shared.activeConversationId = nil
-        }
+        .onDisappear { handleDisappear() }
         // Stop TTS when app enters background to prevent Metal GPU crashes
         // and keep the speakingMessageId state in sync with actual playback.
         // NOTE: Server TTS (AVQueuePlayer) is intentionally NOT stopped here.
@@ -421,43 +386,12 @@ struct ChatDetailView: View {
                 )
             }
         }
-        // Intercept link taps from MarkdownView: download server file URLs
-        // with auth instead of opening Safari (the user may not be logged in
-        // to the browser). MarkdownView posts a notification instead of
-        // calling UIApplication.shared.open directly, so we can route the
-        // URL through our authenticated download flow.
-        .onReceive(NotificationCenter.default.publisher(for: .markdownLinkTapped)) { notification in
-            guard let url = notification.userInfo?["url"] as? URL else { return }
-            let urlString = url.absoluteString
-            let base = viewModel.serverBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-
-            // Server file URL → download with auth token and present share sheet
-            if !base.isEmpty, urlString.hasPrefix(base), urlString.contains("/api/v1/files/"),
-               urlString.hasSuffix("/content") {
-                let parts = urlString.split(separator: "/")
-                if let filesIdx = parts.firstIndex(of: "files"),
-                   filesIdx + 1 < parts.count {
-                    let fileId = String(parts[filesIdx + 1])
-                    Task { await downloadAndShareFile(fileId: fileId) }
-                    return
-                }
-            }
-
-            // All other URLs → open in Safari normally
-            UIApplication.shared.open(url)
-        }
-        // Handle sendPrompt bridge calls from InlineVisualizerView.
-        // Populates the chat input and sends immediately — same pattern as suggestion taps.
-        .onReceive(NotificationCenter.default.publisher(for: .vizSendPrompt)) { notification in
-            guard let text = notification.userInfo?["text"] as? String, !text.isEmpty else { return }
-            if viewModel.isStreaming {
-                // Queue the prompt — set input but don't send while the model is busy
-                viewModel.inputText = text
-            } else {
-                viewModel.inputText = text
-                Task { await viewModel.sendMessage() }
-            }
-        }
+        // Intercept link taps from MarkdownView and vizSendPrompt bridge calls.
+        // Extracted into a private extension to keep the type-checker expression size manageable.
+        .applyLinkAndPromptHandlers(
+            viewModel: viewModel,
+            downloadAndShare: { fileId in Task { await downloadAndShareFile(fileId: fileId) } }
+        )
         // Handle "Ask" / "Explain" taps from the text selection menu in assistant
         // messages. Extracted into a private extension to keep the type-checker
         // expression size manageable.
@@ -912,6 +846,7 @@ struct ChatDetailView: View {
                 },
                 selectedKnowledgeItems: $vm.selectedKnowledgeItems,
                 selectedReferenceChats: $vm.selectedReferenceChats,
+                selectedNotes: $vm.selectedNotes,
                 onHashTrigger: { query in
                     // Detect if the query looks like a URL → show inline suggestion pill
                     let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -989,8 +924,16 @@ struct ChatDetailView: View {
                 onPhotoAttachment: { showPhotosPicker = true },
                 onCameraCapture: { showCameraPicker = true },
                 onWebAttachment: { showWebURLAlert = true },
-                onReferenceChatAttachment: { showReferenceChatPicker = true },
                 onVoiceInput: { toggleVoiceInput() },
+                apiClient: dependencies.apiClient,
+                notesManager: dependencies.notesManager,
+                conversationManager: dependencies.conversationManager,
+                onFilesSelected: { selectedAttachments in
+                    withAnimation { viewModel.attachments.append(contentsOf: selectedAttachments) }
+                },
+                skills: viewModel.availableSkills,
+                selectedSkillIds: $viewModel.selectedSkillIds,
+                isLoadingSkills: viewModel.isLoadingSkills,
                 onDictationStart: { startDictation() },
                 onDictationStop: { stopDictation() },
                 onDictationCancel: { cancelDictation() },
@@ -998,6 +941,7 @@ struct ChatDetailView: View {
                 dictationService: dependencies.dictationService,
                 onToolsSheetPresented: {
                     Task { await viewModel.loadTools() }
+                    viewModel.loadSkills()
                 },
                 onOpenToolUserValves: { id, isFunction in
                     toolUserValvesKind = isFunction ? .function(id) : .tool(id)
@@ -1020,6 +964,29 @@ struct ChatDetailView: View {
             ) { item in
                 viewModel.selectReferenceChat(item)
             }
+        }
+        .sheet(isPresented: $showServerFilesPicker) {
+            ServerFilesPickerSheet(
+                isPresented: $showServerFilesPicker,
+                apiClient: dependencies.apiClient
+            ) { selectedAttachments in
+                withAnimation { viewModel.attachments.append(contentsOf: selectedAttachments) }
+            }
+        }
+        .sheet(isPresented: $showNotesPicker) {
+            NotesPickerSheet(
+                isPresented: $showNotesPicker,
+                notesManager: dependencies.notesManager
+            ) { note in
+                viewModel.selectedNotes.append(note)
+            }
+        }
+        .sheet(isPresented: $showKnowledgeFromMenuPicker) {
+            KnowledgeMenuPickerSheet(
+                isPresented: $showKnowledgeFromMenuPicker,
+                selectedItems: $viewModel.selectedKnowledgeItems,
+                apiClient: dependencies.apiClient
+            )
         }
         // Sync mentionedModel → viewModel.mentionedModelId when user taps × on chip
         .onChange(of: mentionedModel) { _, newModel in
@@ -1123,6 +1090,7 @@ struct ChatDetailView: View {
         }
         .onAppear {
             // Snap instantly to bottom on chat open.
+            _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.4)
             scrollPosition.scrollTo(edge: .bottom)
         }
         // Auto-scroll: when a new message arrives, scroll to bottom.
@@ -1201,8 +1169,11 @@ struct ChatDetailView: View {
         .onChange(of: viewModel.isStreaming) { oldStreaming, newStreaming in
             if newStreaming && streamingAutoScroll {
                 // Stream started — re-engage auto-scroll.
+                // Arm suppression window BEFORE scrollTo so the resulting offset
+                // change never triggers the nav bar hide/show logic.
                 isScrolledUp = false
                 isUserDriving = false
+                _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.4)
                 scrollPosition.scrollTo(edge: .bottom)
             } else if !newStreaming && oldStreaming {
                 // Stream just ended — do nothing.
@@ -1261,7 +1232,7 @@ struct ChatDetailView: View {
         .scrollIndicators(.hidden)
         .scrollDismissesKeyboard(editingMessageId != nil ? .never : .interactively)
         .defaultScrollAnchor(.bottom)
-        .scrollPosition($scrollPosition, anchor: .bottom)
+        .scrollPosition($scrollPosition)
         // Detect scroll position to show/hide FAB + auto-load pagination
         // Track whether the user's finger (or inertia) is driving the scroll view.
         // This is the single gate that allows auto-scroll to disengage:
@@ -1272,11 +1243,11 @@ struct ChatDetailView: View {
             // prevents programmatic scrollTo() animations finishing their deceleration
             // from falsely setting isUserDriving = true, which was racing with the
             // offset observer to incorrectly flip isScrolledUp = true and kill auto-scroll.
-            isUserDriving = (newPhase == .interacting)
+            isUserDriving = (newPhase == .interacting || newPhase == .decelerating)
         }
         .onScrollGeometryChange(for: CGPoint.self) { geo in
             geo.contentOffset
-        } action: { _, newOffset in
+        } action: { oldOffset, newOffset in
             // Track raw offset for the ↑ FAB "find current question" logic.
             currentScrollOffsetY = newOffset.y
 
@@ -1288,13 +1259,59 @@ struct ChatDetailView: View {
                     isScrolledUp = false
                     userMessageJumpIndex = nil
                 }
-            } else if isUserDriving {
+            } else if isUserDriving && distanceFromBottom > 80 {
                 // User's finger (or inertia) is actively driving the scroll view —
                 // the ONLY condition under which auto-scroll is allowed to disengage.
-                if !isScrolledUp { isScrolledUp = true }
+                // Guard 1: distanceFromBottom > 80 prevents the over-scroll elastic bounce
+                // at the bottom from briefly toggling isScrolledUp (which caused jitter
+                // and the FABs flashing momentarily when bouncing off the bottom).
+                // Guard 2: only set isScrolledUp when actually scrolling UP (offset decreasing).
+                // A programmatic scrollTo(bottom) from the ↓ FAB briefly enters .decelerating
+                // (isUserDriving = true) while still far from the bottom — without this guard
+                // it immediately re-shows the FABs even though we're heading to the bottom.
+                let isScrollingUp = newOffset.y < oldOffset.y
+                if isScrollingUp && !isScrolledUp { isScrolledUp = true }
             }
             // All other cases (layout reflows, programmatic scrolls, WKWebView resizes)
             // emit .animating/.idle → isUserDriving is false → no state change.
+
+
+            // ── Nav bar direction-based hide/show ──
+            // HIDE: genuine downward finger/inertia scroll, more than 80pt from the bottom.
+            // SHOW: genuine upward finger/inertia scroll.
+            //
+            // "Genuine" = isUserDriving AND not in a programmatic-scroll suppression window.
+            // The suppression window is armed before every scrollTo() call so that FAB taps,
+            // streaming auto-scroll, stream-start re-engagement, and AnimatedPresence reflow
+            // never trigger the nav bar. Without suppression those events all emit offset
+            // changes that hit the navDelta > 1 hide path and the old unconditional
+            // "near-bottom → show" path, causing the visible pop/flash.
+            //
+            // Always keep lastNavBarOffsetY in sync so the first real drag after a
+            // programmatic scroll gets a correct baseline delta.
+            let navSuppressed = Date() < _pumpRef.programmaticScrollUntil
+            let navDelta = newOffset.y - _pumpRef.lastNavBarOffsetY
+            _pumpRef.lastNavBarOffsetY = newOffset.y
+
+            // Freeze nav bar during streaming — every streaming auto-scroll fires offset
+            // changes that would otherwise toggle the nav bar, causing the visible
+            // pop-in/pop-out the user reported. Only respond to genuine user drags.
+            if !navSuppressed && isUserDriving && !viewModel.isStreaming {
+                if distanceFromBottom > 80 {
+                    if navDelta > 1 && !navBarHidden {
+                        // Scrolling down (away from bottom) — hide
+                        withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = true }
+                    } else if navDelta < -1 && navBarHidden {
+                        // Scrolling up (back toward top) — show
+                        withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = false }
+                    }
+                } else {
+                    // Near/at the bottom with real user scroll upward — show
+                    if navDelta < -1 && navBarHidden {
+                        withAnimation(.easeInOut(duration: 0.2)) { navBarHidden = false }
+                    }
+                }
+            }
 
             // ── At-top detection for ↑ FAB ──
             let atTop = newOffset.y < 50
@@ -1368,23 +1385,33 @@ struct ChatDetailView: View {
         .onScrollGeometryChange(for: CGSize.self) { geo in
             CGSize(width: geo.contentSize.height, height: geo.containerSize.height)
         } action: { oldSize, newSize in
-            let oldContentHeight = viewState_contentHeight
             if abs(newSize.width - viewState_contentHeight) > 1 {
                 viewState_contentHeight = newSize.width
             }
             if abs(newSize.height - viewState_containerHeight) > 1 {
                 viewState_containerHeight = newSize.height
             }
-            // Smooth scroll-to-bottom during active streaming:
-            // When the content height grows (new tokens pushed layout taller)
-            // and the user hasn't scrolled up, animate to the bottom so new
-            // content slides in smoothly instead of snapping.
-            let grew = newSize.width > oldContentHeight + 1
-            if grew && viewModel.isStreaming && !isScrolledUp && !isLoadingMoreMessages {
-                // No throttle — scrollTo(edge:) is driven by the 60 Hz drain tick so
-                // it fires at most once per frame. Calling it every content-height change
-                // gives perfectly smooth scroll that tracks each new character reveal.
-                scrollPosition.scrollTo(edge: .bottom)
+            // Streaming auto-follow:
+            // .defaultScrollAnchor(.bottom) + .scrollPosition(anchor:.bottom) pin the
+            // bottom edge as content grows. When a correction is needed, we snap instantly
+            // (no animation) so the viewport moves in the SAME frame as the new text
+            // appears. Wrapping this in withAnimation(.easeOut) caused the viewport to
+            // lag 0.18s behind the content, making the text and scroll move at different
+            // speeds — the "motion blur / motion sickness" smear the user reported.
+            //
+            // The 24pt dead-band prevents sub-pixel noise from firing a correction on
+            // every floating-point rounding fluctuation in the geometry callback.
+            let contentHeight = newSize.width
+            let containerHeight = newSize.height
+            let distFromBottom = max(0, contentHeight - containerHeight - currentScrollOffsetY)
+            let driftedFar = distFromBottom > 24
+            if driftedFar && viewModel.isStreaming && !isScrolledUp && !isLoadingMoreMessages {
+                // Short linear glide (~0.1s) smooths the per-line-quantum height jumps
+                // (~20pt each) without accumulating lag behind the text. Linear (not easeOut)
+                // ensures consecutive line-wraps chain into one continuous uniform slide.
+                withAnimation(.linear(duration: 0.1)) {
+                    scrollPosition.scrollTo(edge: .bottom)
+                }
             }
         }
     }
@@ -1473,6 +1500,7 @@ struct ChatDetailView: View {
                     userMessageJumpIndex = nil
                     windowEnd = nil
                     windowSize = min(maxWindowSize, viewModel.messages.count)
+                    _pumpRef.programmaticScrollUntil = Date().addingTimeInterval(0.5)
                     withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
                         scrollPosition.scrollTo(edge: .bottom)
                     }
@@ -2917,6 +2945,72 @@ struct ChatDetailView: View {
         showWebURLAlert = false
     }
 
+    // MARK: - Lifecycle Helpers
+
+    private func handleViewTask() async {
+        // Start keyboard tracking FIRST so the bottom inset is
+        // correct for the very first layout pass (D9 fix).
+        keyboard.start()
+        if let manager = dependencies.conversationManager {
+            viewModel.configure(with: manager, socket: dependencies.socketService, store: dependencies.activeChatStore, asr: dependencies.asrService, notes: dependencies.notesManager)
+        }
+        // Perform non-async setup before awaiting load() so the UI
+        // populates prompts and temporary-chat state instantly.
+        if viewModel.isNewConversation {
+            viewModel.isTemporaryChat = UserDefaults.standard.bool(forKey: "temporaryChatDefault")
+        }
+        // Only resolve prompts pre-load for new chats — existing chats
+        // already have a model; we'll resolve after load() below (D10 fix).
+        if viewModel.isNewConversation {
+            randomPrompts = Self.resolvePromptSuggestions(
+                adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
+                modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
+                count: promptCardCount
+            )
+        }
+        NotificationService.shared.activeConversationId =
+            viewModel.conversationId ?? viewModel.conversation?.id
+        await viewModel.load()
+        // After messages load, pin the window to the latest messages.
+        // Do NOT issue a programmatic scrollTo here — defaultScrollAnchor(.bottom)
+        // already places the view at the bottom on first layout, and a redundant
+        // scrollTo after a sleep fights WKWebView / code-block height settling
+        // and produces the visible "bounce" the user reported (A1 fix).
+        let loadedCount = viewModel.messages.count
+        if loadedCount > 0 {
+            isScrolledUp = false
+            windowEnd = nil
+            windowSize = min(maxWindowSize, loadedCount)
+            // Suppress the content-height-driven streaming scroll while
+            // WKWebViews, MarkdownView, and other expensive blocks finish
+            // their first layout pass. The pump interval is 400 ms; adding
+            // a 500 ms offset gives ~900 ms total dead-zone — enough for
+            // WKWebViews on older devices to report their rendered heights
+            // via JS postMessage without triggering scroll position jumps
+            // (A3 fix, extended for lazy WKWebView init).
+            _pumpRef.lastScrollTime = Date().addingTimeInterval(0.5)
+        }
+        await viewModel.fetchPinnedModels()
+        // Rebuild prompts after load() — models are now fetched with fresh
+        // suggestion_prompts from the server.
+        randomPrompts = Self.resolvePromptSuggestions(
+            adminSuggestions: dependencies.authViewModel.backendConfig?.defaultPromptSuggestions,
+            modelSuggestions: viewModel.selectedModel?.suggestionPrompts,
+            count: promptCardCount
+        )
+    }
+
+    private func handleDisappear() {
+        keyboard.stop()
+        // Stop TTS playback and clear state when navigating away from chat
+        if speakingMessageId != nil || ttsGeneratingMessageId != nil {
+            dependencies.textToSpeechService.stop()
+            speakingMessageId = nil
+            ttsGeneratingMessageId = nil
+        }
+        NotificationService.shared.activeConversationId = nil
+    }
+
     // MARK: - Dictation
 
     private func startDictation() {
@@ -4350,6 +4444,13 @@ private struct ScrollViewHorizontalLock: UIViewRepresentable {
                     scrollView.showsHorizontalScrollIndicator = false
                     scrollView.isDirectionalLockEnabled = true
 
+                    // iOS 26: disable the Liquid Glass scroll-edge effect (frosty blur
+                    // that appears at the top when content scrolls under the nav bar).
+                    // iOS 26 "Liquid Glass" frosty blur at scroll edges.
+                    // edgeEffectEnabled is not yet in the public SDK headers,
+                    // so we use KVC to set it at runtime.
+                    scrollView.setValue(false, forKey: "edgeEffectEnabled")
+
                     // Bug 3: KVO snaps contentOffset.x to 0.
                     // Threshold raised from 0.5 pt to 2 pt to avoid false positives
                     // from floating-point rounding during programmatic scroll animations.
@@ -4576,6 +4677,48 @@ private extension View {
                     for urlString in urls {
                         viewModel.processWebURL(urlString: urlString)
                     }
+                }
+            }
+    }
+}
+
+// MARK: - Link Tap & vizSendPrompt Handlers (Type-Checker Relief)
+
+/// Handles `.markdownLinkTapped` (authenticated file download) and `.vizSendPrompt`
+/// (InlineVisualizerView prompt bridge). Extracted from body so the Swift type-checker
+/// doesn't have to resolve these closures inline.
+private extension View {
+    func applyLinkAndPromptHandlers(
+        viewModel: ChatViewModel,
+        downloadAndShare: @escaping (String) -> Void
+    ) -> some View {
+        self
+            // Intercept link taps from MarkdownView: download server file URLs
+            // with auth instead of opening Safari.
+            .onReceive(NotificationCenter.default.publisher(for: .markdownLinkTapped)) { notification in
+                guard let url = notification.userInfo?["url"] as? URL else { return }
+                let urlString = url.absoluteString
+                let base = viewModel.serverBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                if !base.isEmpty, urlString.hasPrefix(base), urlString.contains("/api/v1/files/"),
+                   urlString.hasSuffix("/content") {
+                    let parts = urlString.split(separator: "/")
+                    if let filesIdx = parts.firstIndex(of: "files"),
+                       filesIdx + 1 < parts.count {
+                        let fileId = String(parts[filesIdx + 1])
+                        downloadAndShare(fileId)
+                        return
+                    }
+                }
+                UIApplication.shared.open(url)
+            }
+            // Handle sendPrompt bridge calls from InlineVisualizerView.
+            .onReceive(NotificationCenter.default.publisher(for: .vizSendPrompt)) { notification in
+                guard let text = notification.userInfo?["text"] as? String, !text.isEmpty else { return }
+                if viewModel.isStreaming {
+                    viewModel.inputText = text
+                } else {
+                    viewModel.inputText = text
+                    Task { await viewModel.sendMessage() }
                 }
             }
     }

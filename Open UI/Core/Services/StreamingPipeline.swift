@@ -131,7 +131,8 @@ actor StreamingPipeline {
     /// Minimum chars/frame floor — ensures at least a trickle even with tiny buffers.
     private let minRatePerFrame: Double = 0.3
 
-    /// Maximum chars/frame cap
+    /// Maximum chars/frame cap — 15 chars/frame × 60 Hz = 900 chars/sec,
+    /// enough to reveal a fast model's output without visible lag.
     private let maxRatePerFrame: Double = 15.0
 
     /// Perceptual keep-back: reserve this many chars so the drain never fully
@@ -229,8 +230,10 @@ actor StreamingPipeline {
     private func startTimer() {
         stopTimer()
         let timer = DispatchSource.makeTimerSource(queue: Self.timerQueue)
-        // 60 Hz — 16.6 ms interval, 1 ms leeway for minimal jitter.
-        timer.schedule(deadline: .now(), repeating: .milliseconds(16), leeway: .milliseconds(1))
+        // 60 Hz drain cadence — 16 ms interval. The scroll glide is handled by
+        // .defaultScrollAnchor(.bottom) which pins sub-pixel continuously; the
+        // drain timer only controls typewriter character reveal rate.
+        timer.schedule(deadline: .now(), repeating: .milliseconds(16), leeway: .milliseconds(2))
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             Task { await self.drainTick() }
@@ -340,7 +343,10 @@ actor StreamingPipeline {
 
     // MARK: - Prose boundary helpers
 
-    private static let proseBoundaryHysteresis: Int = 400
+    /// Minimum characters the live tail must grow beyond the current prose boundary
+    /// before it advances. Larger value = fewer live→frozen migrations = fewer visible
+    /// reflow/settle pops during streaming. 1200 chars ≈ ~3–5 paragraphs of prose.
+    private static let proseBoundaryHysteresis: Int = 1200
 
     private func updateProseBoundary(in dc: String, effectiveFrozen: Int) {
         if effectiveFrozen > 0 {

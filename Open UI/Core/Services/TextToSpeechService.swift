@@ -688,8 +688,16 @@ final class TextToSpeechService: NSObject {
                 guard let text = chunk else {
                     // Queue empty — wait briefly for streaming to add more chunks
                     try? await Task.sleep(for: .milliseconds(80))
-                    let stillEmpty = await MainActor.run { self.serverQueue.isEmpty }
-                    if stillEmpty { break }
+                    let (stillEmpty, stillStreaming) = await MainActor.run {
+                        (self.serverQueue.isEmpty, self.isStreamingTTS)
+                    }
+                    // During streaming TTS (voice call / incremental feed), sentences
+                    // arrive one at a time as the LLM produces them. Don't exit the
+                    // pipeline just because the queue is momentarily empty — keep waiting
+                    // until streaming is marked done AND the queue is truly exhausted.
+                    // Without this, each sentence restarts the pipeline, creates a new
+                    // AVQueuePlayer, and tears down the audio session — causing silence.
+                    if stillEmpty && !stillStreaming { break }
                     continue
                 }
 

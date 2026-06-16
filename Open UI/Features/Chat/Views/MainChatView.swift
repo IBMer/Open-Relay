@@ -280,6 +280,7 @@ struct MainChatView: View {
                             }
                         }
                     }
+                    .toolbarBackground(.hidden, for: .navigationBar)
             }
             .ignoresSafeArea(.keyboard)
             .allowsHitTesting(drawerFraction < 0.01 && !isDraggingDrawer && !isDraggingFileBrowser)
@@ -957,6 +958,17 @@ struct MainChatView: View {
                     group.addTask { await dependencies.fetchTaskConfig() }
                     group.addTask { await channelListVM.loadChannels() }
                 }
+                // Restore the last active conversation after a cold launch or process kill.
+                // activeConversationId is @State and resets to nil on every process restart.
+                // SharedDataService persists the last-opened ID across kills so we can
+                // land the user back in their chat instead of the blank new-chat screen.
+                // Only restore if the conversation still exists in the loaded list — this
+                // guards against navigating to a deleted or archived chat.
+                if activeConversationId == nil,
+                   let lastId = SharedDataService.shared.lastActiveConversationId,
+                   listViewModel.conversations.contains(where: { $0.id == lastId }) {
+                    activeConversationId = lastId
+                }
                 registerSocketReconnectHandler()
                 // Wire up channel notification tap → navigate to that channel
                 NotificationService.shared.onOpenChannel = { channelId in
@@ -1253,6 +1265,9 @@ struct MainChatView: View {
                 newChatGeneration += 1
             }
         }
+        // Clear the persisted last-active conversation so a cold launch after
+        // this explicit new-chat navigation does not restore the old chat.
+        SharedDataService.shared.saveLastActiveConversationId(nil)
         // Reset terminal file browser state so it starts fresh in the new chat
         closeFileBrowserAnimated()
         terminalBrowserVM.reset()

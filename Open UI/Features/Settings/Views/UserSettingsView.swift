@@ -292,18 +292,77 @@ struct UserSettingsView: View {
 
     // MARK: - Special Rows
 
+    /// reasoning_effort row: Default → low → medium → high → xhigh → Custom (free-text)
+    /// Emits two list items: the pill cycling row, and (when in Custom mode) a plain text field row.
     @ViewBuilder
     private var reasoningEffortRow: some View {
-        let states: [(label: String, value: String?)] = [
-            ("low",    "low"),
-            ("medium", "medium"),
-            ("high",   "high"),
-        ]
-        cyclingPillRow(
-            label: "reasoning_effort",
-            value: $draft.reasoningEffort,
-            states: states
-        )
+        let presets: [String] = ["low", "medium", "high", "xhigh"]
+        let current = draft.reasoningEffort
+        let isCustom = current != nil && !presets.contains(current!)
+
+        let currentLabel: String = {
+            if current == nil { return "Default" }
+            if presets.contains(current!) { return current! }
+            return "Custom"
+        }()
+
+        // Row 1: pill cycling button
+        HStack {
+            Text("reasoning_effort")
+                .font(.body)
+            Spacer()
+            Button {
+                let next: String?
+                if current == nil {
+                    next = "low"
+                } else if current == "low" {
+                    next = "medium"
+                } else if current == "medium" {
+                    next = "high"
+                } else if current == "high" {
+                    next = "xhigh"
+                } else if current == "xhigh" {
+                    next = ""   // enter custom mode with empty field
+                } else {
+                    next = nil  // custom → back to Default
+                }
+                draft.reasoningEffort = next
+                Haptics.play(.light)
+            } label: {
+                Text(currentLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.accentColor.opacity(0.12))
+                    .clipShape(Capsule())
+                    .overlay(Capsule().strokeBorder(Color.accentColor.opacity(0.35), lineWidth: 0.75))
+            }
+            .buttonStyle(.plain)
+        }
+
+        // Row 2: plain text field, only shown in Custom mode
+        if isCustom || current == "" {
+            HStack {
+                Text("Custom value")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                TextField("e.g. auto, xhigh…", text: Binding(
+                    get: { draft.reasoningEffort ?? "" },
+                    set: { draft.reasoningEffort = $0 }
+                ))
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.trailing)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 200)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .submitLabel(.done)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
     }
 
     @ViewBuilder

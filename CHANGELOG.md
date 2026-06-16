@@ -1,5 +1,17 @@
 # Changelog
 
+## v4.11 — June 16, 2026
+
+### What's New
+- Added Attach Files, Attach Notes, Attach Knowledge, and Skills sections to the + menu in chat — quickly attach server-uploaded files, notes, or knowledge bases, and toggle skills directly from the compose menu.
+
+### Improvements
+- Reasoning effort parameter now includes "xhigh" as a preset option and a "Custom" free-text mode for any value a provider supports.
+- Many qol updates.
+
+### Bug Fixes
+- Fixed a frosty/translucent bar appearing at the top of the chat screen when scrolling — the navigation bar background now stays fully transparent at all scroll positions.
+
 ## v4.10.1 — June 12, 2026
 
 ### Improvements

@@ -1124,11 +1124,7 @@ struct AdminModelsGlobalSettingsSheet: View {
 
                     // Reasoning
                     paramGroupHeader("Reasoning")
-                    adminCyclingPillRow(
-                        label: "reasoning_effort",
-                        value: $viewModel.paramReasoningEffort,
-                        states: [("low", "low"), ("medium", "medium"), ("high", "high")]
-                    )
+                    adminReasoningEffortRow
                 }
                 .background(theme.surfaceContainer)
                 .clipShape(RoundedRectangle(cornerRadius: CornerRadius.md, style: .continuous))
@@ -1444,6 +1440,87 @@ struct AdminModelsGlobalSettingsSheet: View {
         }
         .padding(.horizontal, Spacing.screenPadding)
         .padding(.vertical, Spacing.sm)
+    }
+
+    // reasoning_effort row: Default → low → medium → high → xhigh → Custom (free-text)
+    // Emits one or two rows: the pill cycling row, plus (when in Custom mode) a plain text field row.
+    @ViewBuilder
+    private var adminReasoningEffortRow: some View {
+        let presets: [String] = ["low", "medium", "high", "xhigh"]
+        let current = viewModel.paramReasoningEffort
+        let isCustom = current != nil && !presets.contains(current!)
+
+        let currentLabel: String = {
+            if current == nil { return "Default" }
+            if presets.contains(current!) { return current! }
+            return "Custom"
+        }()
+
+        // Row 1: pill cycling button
+        HStack {
+            Text("reasoning_effort")
+                .scaledFont(size: 14)
+                .foregroundStyle(theme.textPrimary)
+            Spacer()
+            Button {
+                let next: String?
+                if current == nil {
+                    next = "low"
+                } else if current == "low" {
+                    next = "medium"
+                } else if current == "medium" {
+                    next = "high"
+                } else if current == "high" {
+                    next = "xhigh"
+                } else if current == "xhigh" {
+                    next = ""
+                } else {
+                    next = nil
+                }
+                viewModel.paramReasoningEffort = next
+            } label: {
+                Text(currentLabel)
+                    .scaledFont(size: 12, weight: .semibold)
+                    .foregroundStyle(theme.brandPrimary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(theme.brandPrimary.opacity(0.12))
+                    .clipShape(Capsule())
+                    .overlay(Capsule().strokeBorder(theme.brandPrimary.opacity(0.35), lineWidth: 0.75))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, Spacing.screenPadding)
+        .padding(.vertical, Spacing.sm)
+
+        // Row 2: plain text field, only shown in Custom mode
+        if isCustom || current == "" {
+            Divider()
+                .background(theme.inputBorder.opacity(0.2))
+                .padding(.leading, Spacing.screenPadding)
+            HStack {
+                Text("Custom value")
+                    .scaledFont(size: 14)
+                    .foregroundStyle(theme.textSecondary)
+                Spacer()
+                TextField("e.g. auto, xhigh…", text: Binding(
+                    get: { viewModel.paramReasoningEffort ?? "" },
+                    set: { viewModel.paramReasoningEffort = $0 }
+                ))
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.trailing)
+                .scaledFont(size: 13)
+                .foregroundStyle(theme.textSecondary)
+                .frame(maxWidth: 200)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .submitLabel(.done)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+            .padding(.horizontal, Spacing.screenPadding)
+            .padding(.vertical, Spacing.sm)
+        }
     }
 
     // Reasoning tags row (shows comma-separated tags)

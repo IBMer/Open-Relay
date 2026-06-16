@@ -391,6 +391,70 @@ struct FileInfoResponse: Codable, Sendable {
     }
 }
 
+/// A file returned by the search endpoint (`GET /api/v1/files/search`).
+///
+/// The search API nests display metadata (name, content type, size) inside
+/// a `meta` object, unlike the flat `FileInfoResponse` from `GET /api/v1/files/`.
+struct FileSearchResult: Codable, Sendable {
+    let id: String
+    let filename: String?
+    let createdAt: Double?
+    let updatedAt: Double?
+
+    // Nested meta fields
+    let metaName: String?
+    let metaContentType: String?
+    let metaSize: Int?
+
+    /// Human-readable display name — prefers meta.name, falls back to filename.
+    var displayName: String {
+        if let name = metaName, !name.isEmpty { return name }
+        return filename ?? id
+    }
+
+    /// Content type string (e.g. "application/pdf").
+    var contentType: String? { metaContentType }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, filename
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case meta
+    }
+
+    private enum MetaCodingKeys: String, CodingKey {
+        case name
+        case contentType = "content_type"
+        case size
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        filename = try container.decodeIfPresent(String.self, forKey: .filename)
+        createdAt = try container.decodeIfPresent(Double.self, forKey: .createdAt)
+        updatedAt = try container.decodeIfPresent(Double.self, forKey: .updatedAt)
+
+        if let metaContainer = try? container.nestedContainer(keyedBy: MetaCodingKeys.self, forKey: .meta) {
+            metaName = try metaContainer.decodeIfPresent(String.self, forKey: .name)
+            metaContentType = try metaContainer.decodeIfPresent(String.self, forKey: .contentType)
+            metaSize = try metaContainer.decodeIfPresent(Int.self, forKey: .size)
+        } else {
+            metaName = nil
+            metaContentType = nil
+            metaSize = nil
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(filename, forKey: .filename)
+        try container.encodeIfPresent(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(updatedAt, forKey: .updatedAt)
+    }
+}
+
 // MARK: - Folder
 
 /// A folder for organising conversations.

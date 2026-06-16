@@ -1580,7 +1580,37 @@ final class APIClient: @unchecked Sendable {
     }
 
     func getUserFiles() async throws -> [FileInfoResponse] {
-        try await network.request([FileInfoResponse].self, path: "/api/v1/files/")
+        let (rawData, _) = try await network.requestRaw(path: "/api/v1/files/")
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        // Server returns paginated {"items": [...], "total": N}
+        if let dict = try JSONSerialization.jsonObject(with: rawData) as? [String: Any],
+           let itemsArray = dict["items"] {
+            let itemsData = try JSONSerialization.data(withJSONObject: itemsArray)
+            return (try? decoder.decode([FileInfoResponse].self, from: itemsData)) ?? []
+        }
+        // Fallback: bare array (older server versions)
+        return (try? decoder.decode([FileInfoResponse].self, from: rawData)) ?? []
+    }
+
+    /// Fetches all server-uploaded files using the paginated search endpoint.
+    ///
+    /// `GET /api/v1/files/search?filename=*&skip=N&limit=50` — pages through results
+    /// until a page returns fewer than `limit` items, then returns all combined results.
+    func searchAllFiles() async throws -> [FileSearchResult] {
+        let limit = 50
+        var skip = 0
+        var allFiles: [FileSearchResult] = []
+
+        while true {
+            let path = "/api/v1/files/search?filename=*&skip=\(skip)&limit=\(limit)"
+            let page = try await network.request([FileSearchResult].self, path: path)
+            allFiles.append(contentsOf: page)
+            if page.count < limit { break }
+            skip += limit
+        }
+
+        return allFiles
     }
 
     func deleteFile(id: String) async throws {
